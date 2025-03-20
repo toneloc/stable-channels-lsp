@@ -1,8 +1,7 @@
 #[cfg(feature = "lsp")]
 use eframe::{egui, App, Frame};
 use ldk_node::{
-    bitcoin::{secp256k1::PublicKey, Network, Address},
-    lightning::ln::msgs::SocketAddress,
+    bitcoin::{Network, Address},
     lightning_invoice::Bolt11Invoice,
     Builder, Node, Event, liquidity::LSPS2ServiceConfig,
 };
@@ -23,7 +22,6 @@ const DEFAULT_NETWORK: &str = "signet";
 #[cfg(feature = "lsp")]
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 
-/// The main app state for the LSP interface
 #[cfg(feature = "lsp")]
 struct LspApp {
     node: Node,
@@ -35,6 +33,13 @@ struct LspApp {
     status_message: String,
     last_update: Instant,
     channel_info: String,
+    lightning_balance_btc: f64,
+    onchain_balance_btc: f64,
+    btc_price: f64,
+    lightning_balance_usd: f64,
+    onchain_balance_usd: f64,
+    total_balance_btc: f64,
+    total_balance_usd: f64,
 }
 
 #[cfg(feature = "lsp")]
@@ -115,7 +120,7 @@ impl LspApp {
         
         println!("LSP node started with ID: {}", node.node_id());
         
-        Self {
+        let mut app = Self {
             node,
             invoice_amount: "10000".to_string(), // Default 10k sats
             invoice_result: String::new(),
@@ -125,6 +130,49 @@ impl LspApp {
             status_message: String::new(),
             last_update: Instant::now(),
             channel_info: String::new(),
+            lightning_balance_btc: 0.0,
+            onchain_balance_btc: 0.0,
+            btc_price: 55000.0, // Default BTC price
+            lightning_balance_usd: 0.0,
+            onchain_balance_usd: 0.0,
+            total_balance_btc: 0.0,
+            total_balance_usd: 0.0,
+        };
+        
+        // Update balances once initially
+        app.update_balances();
+        
+        app
+    }
+    
+    fn update_balances(&mut self) {
+        // Get balances from node
+        let balances = self.node.list_balances();
+        
+        // Convert from sats to BTC
+        self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
+        self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
+        
+        // Calculate USD value
+        self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
+        self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
+        
+        // Calculate totals
+        self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
+        self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+        
+        // For a real application, you would fetch the price from an API
+        // Try to import the price feed function if available
+        #[cfg(feature = "lsp")]
+        {
+            // Attempt to get price from price_feeds module if it exists
+            if let Ok(latest_price) = std::panic::catch_unwind(|| crate::price_feeds::get_latest_price(&ureq::Agent::new())) {
+                self.btc_price = latest_price;
+                // Recalculate USD values with new price
+                self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
+                self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
+                self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+            }
         }
     }
 }
@@ -135,8 +183,9 @@ impl App for LspApp {
         // Poll for LDK node events
         self.poll_events();
         
-        // Update periodically
+        // Update balances and other info periodically
         if self.last_update.elapsed() > Duration::from_secs(5) {
+            self.update_balances();
             self.update_channel_info();
             self.last_update = Instant::now();
         }
@@ -157,15 +206,18 @@ impl LspApp {
                 Event::ChannelReady { channel_id, .. } => {
                     self.status_message = format!("Channel {} is now ready", channel_id);
                     self.update_channel_info();
+                    self.update_balances();
                 }
                 
                 Event::PaymentReceived { payment_hash, amount_msat, .. } => {
                     self.status_message = format!("Received payment of {} msats", amount_msat);
+                    self.update_balances();
                 }
                 
                 Event::ChannelClosed { channel_id, .. } => {
                     self.status_message = format!("Channel {} has been closed", channel_id);
                     self.update_channel_info();
+                    self.update_balances();
                 }
                 
                 _ => {} // Ignore other events for now
@@ -203,6 +255,40 @@ impl LspApp {
                 ui.group(|ui| {
                     ui.label(format!("Node ID: {}", self.node.node_id()));
                     ui.label(format!("Listening on: 127.0.0.1:{}", LSP_PORT));
+                });
+                
+                ui.add_space(20.0);
+                
+                // NEW BALANCE SECTION
+                ui.group(|ui| {
+                    ui.heading("Balances");
+                    ui.add_space(5.0);
+                    
+                    // Lightning balance
+                    ui.horizontal(|ui| {
+                        ui.label("Lightning:");
+                        ui.monospace(format!("{:.8} BTC", self.lightning_balance_btc));
+                        ui.monospace(format!("(${:.2})", self.lightning_balance_usd));
+                    });
+                    
+                    // On-chain balance
+                    ui.horizontal(|ui| {
+                        ui.label("On-chain:  ");
+                        ui.monospace(format!("{:.8} BTC", self.onchain_balance_btc));
+                        ui.monospace(format!("(${:.2})", self.onchain_balance_usd));
+                    });
+                    
+                    // Total balance
+                    ui.horizontal(|ui| {
+                        ui.label("Total:     ");
+                        ui.strong(format!("{:.8} BTC", self.total_balance_btc));
+                        ui.strong(format!("(${:.2})", self.total_balance_usd));
+                    });
+                    
+                    ui.add_space(5.0);
+                    ui.label(format!("Price: ${:.2} | Updated: {} seconds ago", 
+                                     self.btc_price,
+                                     self.last_update.elapsed().as_secs()));
                 });
                 
                 ui.add_space(20.0);
@@ -258,6 +344,8 @@ impl LspApp {
                                     Ok(payment_id) => {
                                         self.status_message = format!("Payment sent, ID: {}", payment_id);
                                         self.invoice_to_pay.clear();
+                                        // Update balances after payment
+                                        self.update_balances();
                                     },
                                     Err(e) => {
                                         self.status_message = format!("Payment error: {}", e);
@@ -318,6 +406,8 @@ impl LspApp {
                                         match self.node.onchain_payment().send_to_address(&addr_checked, amount, None) {
                                             Ok(txid) => {
                                                 self.status_message = format!("Transaction sent: {}", txid);
+                                                // Update balances after sending
+                                                self.update_balances();
                                             },
                                             Err(e) => {
                                                 self.status_message = format!("Transaction error: {}", e);
