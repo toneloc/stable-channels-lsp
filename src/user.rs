@@ -2,12 +2,14 @@
 use eframe::{egui, App, Frame};
 use ldk_node::{
     bitcoin::{secp256k1::PublicKey, Network},
+    lightning::ln::msgs::SocketAddress,
     Builder, Node, Event
 };
 use std::path::PathBuf;
-use std::str::FromStr;
-use hex;
 use std::time::{Duration, Instant};
+use image::{GrayImage, Luma};
+use qrcode::{QrCode, Color};
+use egui::TextureOptions;
 
 // Configuration constants
 #[cfg(feature = "user")]
@@ -21,7 +23,7 @@ const DEFAULT_NETWORK: &str = "signet";
 #[cfg(feature = "user")]
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 #[cfg(feature = "user")]
-const DEFAULT_LSP_PUBKEY: &str = "02f66757a6204814d0996bf819a47024de6f18c3878e7797938d13a69a54d3791b";
+const DEFAULT_LSP_PUBKEY: &str = "02fe1194d6359a045419c88304bc9bd77de4b4b19f22f5160f0ca7eb722bd86d27";
 #[cfg(feature = "user")]
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 #[cfg(feature = "user")]
@@ -37,6 +39,10 @@ struct StableChannelsApp {
     show_onboarding: bool,
     last_update: Instant,
     status_message: String,
+    // Added fields for invoice and QR code
+    invoice_result: String,
+    qr_texture: Option<egui::TextureHandle>,
+    waiting_for_payment: bool,
 }
 
 #[cfg(feature = "user")]
@@ -80,10 +86,20 @@ impl StableChannelsApp {
         
         // Configure LSP if pubkey is available
         if let Some(lsp_pubkey) = lsp_pubkey {
-            match DEFAULT_LSP_ADDRESS.parse() {
-                Ok(addr) => {
-                    builder.set_liquidity_source_lsps2(addr, lsp_pubkey, Some(DEFAULT_LSP_AUTH.to_string()));
-                    println!("LSP configured with address: {}", DEFAULT_LSP_ADDRESS);
+            match DEFAULT_LSP_ADDRESS.parse::<std::net::SocketAddr>() {
+                Ok(socket_addr) => {
+                    // Convert to SocketAddress for LDK
+                    let ldk_socket_addr = SocketAddress::from(socket_addr);
+                    
+                    println!("Setting LSP with address: {} and pubkey: {}", 
+                             DEFAULT_LSP_ADDRESS, lsp_pubkey);
+                    
+                    // The correct parameter order is (pubkey, address, auth_token)
+                    builder.set_liquidity_source_lsps2(
+                        lsp_pubkey,
+                        ldk_socket_addr, 
+                        Some(DEFAULT_LSP_AUTH.to_string())
+                    );
                 },
                 Err(e) => {
                     println!("Error parsing LSP address: {:?}", e);
@@ -139,57 +155,104 @@ impl StableChannelsApp {
         
         println!("User node started with ID: {}", node.node_id());
         
-        // Determine if we show onboarding based on existing channels
         let show_onboarding = node.list_channels().is_empty();
         
         Self {
             node,
             balance_btc: 0.0,
             balance_usd: 0.0,
-            btc_price: 60000.0, // Default placeholder price
+            btc_price: 0.0, 
             show_onboarding,
             last_update: Instant::now(),
             status_message: String::new(),
+            invoice_result: String::new(),
+            qr_texture: None,
+            waiting_for_payment: false,
         }
     }
-}
-
-#[cfg(feature = "user")]
-impl App for StableChannelsApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        // Poll for LDK node events
-        self.poll_events();
+    
+    fn get_jit_invoice(&mut self, ctx: &egui::Context) {
+        let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+            ldk_node::lightning_invoice::Description::new("Stable Channel JIT payment".to_string()).unwrap()
+        );
         
-        // Update balances periodically
-        if self.last_update.elapsed() > Duration::from_secs(5) {
-            self.update_balances();
-            self.last_update = Instant::now();
+    
+        // Default to 20k sats (~$10-12 at current prices)
+        let result = self.node.bolt11_payment().receive_via_jit_channel(
+            20_000_000, // 20k sats in msats
+            &description,
+            3600, // 1 hour expiry
+            Some(10_000_000), // minimum channel size of 10k sats
+        );
+    
+        match result {
+            Ok(invoice) => {
+                self.invoice_result = invoice.to_string();
+                
+                // Generate QR code
+                let code = QrCode::new(&self.invoice_result).unwrap();
+                let bits = code.to_colors();
+                let width = code.width();
+                let scale_factor = 4;
+                let mut imgbuf = GrayImage::new(
+                    (width * scale_factor) as u32, 
+                    (width * scale_factor) as u32
+                );
+    
+                for y in 0..width {
+                    for x in 0..width {
+                        let color = if bits[y * width + x] == Color::Dark { 0 } else { 255 };
+                        for dy in 0..scale_factor {
+                            for dx in 0..scale_factor {
+                                imgbuf.put_pixel(
+                                    (x * scale_factor + dx) as u32,
+                                    (y * scale_factor + dy) as u32,
+                                    Luma([color]),
+                                );
+                            }
+                        }
+                    }
+                }
+                
+                // Convert to egui texture
+                let (w, h) = (imgbuf.width() as usize, imgbuf.height() as usize);
+                let mut rgba = Vec::with_capacity(w * h * 4);
+                for pixel in imgbuf.pixels() {
+                    let lum = pixel[0];
+                    rgba.push(lum);
+                    rgba.push(lum);
+                    rgba.push(lum);
+                    rgba.push(255);
+                }
+                
+                let color_image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+                self.qr_texture = Some(ctx.load_texture("qr_code", color_image, TextureOptions::LINEAR));
+                
+                self.status_message = "Invoice generated. Pay it to create a JIT channel.".to_string();
+                self.waiting_for_payment = true;
+            }
+            Err(e) => {
+                self.invoice_result = format!("Error: {e:?}");
+                self.status_message = format!("Failed to generate invoice: {}", e);
+            }
         }
-        
-        // Show appropriate screen
-        if self.show_onboarding {
-            self.show_onboarding_screen(ctx);
-        } else {
-            self.show_main_screen(ctx);
-        }
-        
-        // Request a repaint frequently to keep the UI responsive
-        ctx.request_repaint_after(Duration::from_millis(100));
     }
-}
-
-#[cfg(feature = "user")]
-impl StableChannelsApp {
+    
     fn poll_events(&mut self) {
         while let Some(event) = self.node.next_event() {
             match event {
                 Event::ChannelReady { channel_id, .. } => {
                     self.status_message = format!("Channel {} is now ready", channel_id);
                     self.show_onboarding = false;
+                    self.waiting_for_payment = false; // Exit payment screen if we were waiting
                 }
                 
-                Event::PaymentReceived { payment_hash, amount_msat, .. } => {
+                Event::PaymentReceived { amount_msat, .. } => {
                     self.status_message = format!("Received payment of {} msats", amount_msat);
+                    // Move to main screen if we were waiting
+                    if self.waiting_for_payment {
+                        self.waiting_for_payment = false;
+                    }
                 }
                 
                 Event::ChannelClosed { channel_id, .. } => {
@@ -197,6 +260,7 @@ impl StableChannelsApp {
                     // If no channels left, go back to onboarding
                     if self.node.list_channels().is_empty() {
                         self.show_onboarding = true;
+                        self.waiting_for_payment = false;
                     }
                 }
                 
@@ -212,6 +276,74 @@ impl StableChannelsApp {
         self.balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
         // Calculate USD value
         self.balance_usd = self.balance_btc * self.btc_price;
+    }
+
+    fn show_waiting_for_payment_screen(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(10.0);
+
+            ui.vertical_centered(|ui| {
+                ui.heading(
+                    egui::RichText::new("Send yourself bitcoin to stabilize.")
+                        .size(16.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+                ui.add_space(3.0);
+                ui.label("This is a Bolt11 Lightning invoice.");
+                ui.add_space(8.0);
+
+                if let Some(ref qr) = self.qr_texture {
+                    ui.image(qr);
+                } else {
+                    ui.label("Lightning QR Missing");
+                }
+
+                ui.add_space(8.0);
+
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.invoice_result)
+                        .frame(true)
+                        .desired_width(400.0)
+                        .desired_rows(3)
+                        .hint_text("Invoice..."),
+                );
+
+                ui.add_space(8.0);
+
+                if ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("Copy Invoice")
+                            .color(egui::Color32::BLACK)
+                            .size(16.0), 
+                    )
+                    .min_size(egui::vec2(120.0, 36.0))
+                    .fill(egui::Color32::from_gray(220))
+                    .rounding(6.0),
+                ).clicked() {
+                    ui.output_mut(|o| {
+                        o.copied_text = self.invoice_result.clone();
+                    });
+                }
+                
+                ui.add_space(5.0); 
+                
+                if ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("Back")
+                            .color(egui::Color32::BLACK)
+                            .size(16.0), 
+                    )
+                    .min_size(egui::vec2(120.0, 36.0))
+                    .fill(egui::Color32::from_gray(220))
+                    .rounding(6.0), 
+                ).clicked() {
+                    self.waiting_for_payment = false;
+                }
+                
+                ui.add_space(8.0); 
+            });
+        });
     }
 
     fn show_onboarding_screen(&mut self, ctx: &egui::Context) {
@@ -275,7 +407,7 @@ impl StableChannelsApp {
     
                 if ui.add(create_channel_button).clicked() {
                     self.status_message = "Getting JIT channel invoice...".to_string();
-                    // TODO: Implement JIT invoice generation
+                    self.get_jit_invoice(ctx);
                 }
                 
                 // Show status message if there is one
@@ -375,6 +507,32 @@ impl StableChannelsApp {
                 }
             });
         });
+    }
+}
+
+#[cfg(feature = "user")]
+impl App for StableChannelsApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        // Poll for LDK node events
+        self.poll_events();
+        
+        // Update balances periodically
+        if self.last_update.elapsed() > Duration::from_secs(5) {
+            self.update_balances();
+            self.last_update = Instant::now();
+        }
+        
+        // Show appropriate screen
+        if self.waiting_for_payment {
+            self.show_waiting_for_payment_screen(ctx);
+        } else if self.show_onboarding {
+            self.show_onboarding_screen(ctx);
+        } else {
+            self.show_main_screen(ctx);
+        }
+        
+        // Request a repaint frequently to keep the UI responsive
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
 }
 
