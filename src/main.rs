@@ -1,3 +1,5 @@
+pub mod price_feeds;
+
 #[cfg(feature = "user")]
 mod user;
 

@@ -10,6 +10,8 @@ use std::str::FromStr;
 use hex;
 use std::time::{Duration, Instant};
 
+use crate::price_feeds::get_latest_price;
+
 // Configuration constants
 #[cfg(feature = "lsp")]
 const LSP_DATA_DIR: &str = "data/lsp";
@@ -146,29 +148,23 @@ impl LspApp {
     }
     
     fn update_balances(&mut self) {
-        // Get balances from node
         let balances = self.node.list_balances();
         
-        // Convert from sats to BTC
         self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
         self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
         
-        // Calculate USD value
         self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
         self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
         
-        // Calculate totals
         self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
         self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
         
-        // For a real application, you would fetch the price from an API
-        // Try to import the price feed function if available
         #[cfg(feature = "lsp")]
         {
-            // Attempt to get price from price_feeds module if it exists
-            if let Ok(latest_price) = std::panic::catch_unwind(|| crate::price_feeds::get_latest_price(&ureq::Agent::new())) {
+            if let Ok(latest_price) = std::panic::catch_unwind(|| {
+                crate::price_feeds::get_latest_price(&ureq::Agent::new()).unwrap_or_else(|_| 0.0)
+            }) {
                 self.btc_price = latest_price;
-                // Recalculate USD values with new price
                 self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
                 self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
                 self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
@@ -184,7 +180,7 @@ impl App for LspApp {
         self.poll_events();
         
         // Update balances and other info periodically
-        if self.last_update.elapsed() > Duration::from_secs(5) {
+        if self.last_update.elapsed() > Duration::from_secs(30) {
             self.update_balances();
             self.update_channel_info();
             self.last_update = Instant::now();
