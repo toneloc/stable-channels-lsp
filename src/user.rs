@@ -40,9 +40,10 @@ const EXPECTED_USD: f64 = 1.0;
 #[cfg(feature = "user")]
 struct UserApp {
     node: Node,
-    balance_btc: f64,
-    balance_usd: f64,
+    // Removed the direct BTC/USD fields for the UI
+    // Instead, we rely on stable_channel for the user’s “stable” balances
     btc_price: f64,
+
     show_onboarding: bool,
     last_update: Instant,
     status_message: String,
@@ -52,6 +53,8 @@ struct UserApp {
     stable_channel: StableChannel,
     is_stable_channel_initialized: bool,
     last_stability_check: Instant,
+    invoice_amount: String,
+    invoice_to_pay: String,
 }
 
 #[cfg(feature = "user")]
@@ -178,16 +181,17 @@ impl UserApp {
                 
         let mut stable_channel = StableChannel::default();
         stable_channel.expected_usd = USD::from_f64(EXPECTED_USD);
+
         let is_stable_channel_initialized = false;
 
         let channels = node.list_channels();
         let show_onboarding = channels.is_empty();
-    
+
+        crate::stable::check_stability(&node, &mut stable_channel);
+
         Self {
             node,
-            balance_btc: 0.0,
-            balance_usd: 0.0,
-            btc_price: 0.0, 
+            btc_price: stable_channel.latest_price,
             show_onboarding,
             last_update: Instant::now(),
             status_message: String::new(),
@@ -197,21 +201,23 @@ impl UserApp {
             stable_channel,
             is_stable_channel_initialized,
             last_stability_check: Instant::now(),
+            invoice_amount: String::new(),
+            invoice_to_pay: String::new(),
         }
+
     }
-    
+
     fn get_jit_invoice(&mut self, ctx: &egui::Context) {
         let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
             ldk_node::lightning_invoice::Description::new("Stable Channel JIT payment".to_string()).unwrap()
         );
         
-    
-        // Default to 20k sats (~$10-12 at current prices)
+
         let result = self.node.bolt11_payment().receive_via_jit_channel(
-            2_000_000, // 20k sats in msats
+            5_000_000, 
             &description,
             3600, // 1 hour expiry
-            Some(10_000_000), // minimum channel size of 10k sats
+            Some(1_000_000), // minimum channel size of 10k sats
         );
     
         match result {
@@ -278,10 +284,6 @@ impl UserApp {
                 
                 Event::PaymentReceived { amount_msat, .. } => {
                     self.status_message = format!("Received payment of {} msats", amount_msat);
-
-                    // if self.waiting_for_payment {
-                    //     self.waiting_for_payment = false;
-                    // }
                 }
                 
                 Event::ChannelClosed { channel_id, .. } => {
@@ -298,31 +300,8 @@ impl UserApp {
             self.node.event_handled(); // Mark event as handled
         }
     }
-    
-    fn update_balances(&mut self) {
-        let balances = self.node.list_balances();
-        
-        println!("Total Lightning Balance (sats): {}", balances.total_lightning_balance_sats);
-        
-        if self.btc_price == 0.0 {
-            match get_latest_price(&ureq::Agent::new()) {
-                Ok(latest_price) => {
-                    println!("Fetched latest price: ${:.2}", latest_price);
-                    self.btc_price = latest_price;
-                },
-                Err(e) => {
-                    println!("Failed to fetch price: {:?}", e);
-                    self.btc_price = 55000.0; // Use a reasonable default price
-                }
-            }
-        }
-    
-        self.balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
-        self.balance_usd = self.balance_btc * self.btc_price;
-    
-        println!("Calculated Balance - BTC: {:.8}, USD: {:.2}", self.balance_btc, self.balance_usd);
-    }
 
+    /// Shows the “waiting for payment” screen with the JIT invoice
     fn show_waiting_for_payment_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(10.0);
@@ -391,6 +370,7 @@ impl UserApp {
         });
     }
 
+    /// The “onboarding” screen that prompts the user to stabilize
     fn show_onboarding_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -477,48 +457,49 @@ impl UserApp {
         });
     }
 
+    /// The main screen once the user has a channel
     fn show_main_screen(&mut self, ctx: &egui::Context) {
-
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Stable Channels");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Settings").clicked() {
-                        // TODO: Show settings
-                    }
-                });
-            });
-        });
-
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                let balances = self.node.list_balances();
-                let balance_btc = Bitcoin::from_sats(balances.total_lightning_balance_sats);
-                let balance_usd = USD::from_bitcoin(balance_btc, self.btc_price);
-                
                 ui.add_space(30.0);
-                
+
+                // Display stable channel user balances
                 ui.group(|ui| {
                     ui.add_space(20.0);
                     ui.heading("Your Stable Balance");
-                    ui.add(egui::Label::new(
-                        egui::RichText::new(balance_usd.to_string())
-                            .size(36.0)
-                            .strong(),
-                    ));
+
+                    let stable_btc = if self.stable_channel.is_stable_receiver {
+                        self.stable_channel.stable_receiver_btc
+                    } else {
+                        self.stable_channel.stable_provider_btc
+                    };
+                    let stable_usd = if self.stable_channel.is_stable_receiver {
+                        self.stable_channel.stable_receiver_usd
+                    } else {
+                        self.stable_channel.stable_provider_usd
+                    };
+
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{}", stable_usd))
+                                .size(36.0)
+                                .strong(),
+                        )
+                    );
                     ui.label(format!("Agreed Peg USD: {}", self.stable_channel.expected_usd));
-                    ui.label(format!("Bitcoin: {}", balance_btc.to_string()));
+                    ui.label(format!("Bitcoin: {:.8}", stable_btc));
                     ui.add_space(20.0);
                 });
-
+    
                 ui.add_space(20.0);
-
+    
+                // Display the fetched BTC price
                 ui.group(|ui| {
                     ui.add_space(20.0);
                     ui.heading("Bitcoin Price");
                     ui.label(format!("${:.2}", self.btc_price));
                     ui.add_space(20.0);
-
+    
                     let last_updated = self.last_update.elapsed().as_secs();
                     ui.add_space(5.0);
                     ui.label(
@@ -526,7 +507,7 @@ impl UserApp {
                             .size(12.0)
                             .color(egui::Color32::GRAY),
                     );
-                });
+                });    
                 
                 ui.add_space(20.0);
                 
@@ -556,6 +537,44 @@ impl UserApp {
                     ui.label(self.status_message.clone());
                     ui.add_space(10.0);
                 }
+
+                // Simple invoice generator UI
+                ui.group(|ui| {
+                    ui.label("Generate Invoice");
+                    ui.horizontal(|ui| {
+                        ui.label("Amount (sats):");
+                        ui.text_edit_singleline(&mut self.invoice_amount);
+                        if ui.button("Get Invoice").clicked() {
+                            if let Ok(amount) = self.invoice_amount.parse::<u64>() {
+                                let msats = amount * 1000;
+                                match self.node.bolt11_payment().receive(
+                                    msats,
+                                    &ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+                                        ldk_node::lightning_invoice::Description::new("LSP Invoice".to_string()).unwrap()
+                                    ),
+                                    3600,
+                                ) {
+                                    Ok(invoice) => {
+                                        self.invoice_result = invoice.to_string();
+                                        self.status_message = "Invoice generated".to_string();
+                                    },
+                                    Err(e) => {
+                                        self.status_message = format!("Error: {}", e);
+                                    }
+                                }
+                            } else {
+                                self.status_message = "Invalid amount".to_string();
+                            }
+                        }
+                    });
+                    
+                    if !self.invoice_result.is_empty() {
+                        ui.text_edit_multiline(&mut self.invoice_result);
+                        if ui.button("Copy").clicked() {
+                            ui.output_mut(|o| o.copied_text = self.invoice_result.clone());
+                        }
+                    }
+                });
                 
                 // Action buttons
                 if ui.button("Create New Channel").clicked() {
@@ -583,28 +602,21 @@ impl App for UserApp {
         // Poll for LDK node events
         self.poll_events();
         
-        // Update balances frequently (every 5 seconds)
-        if self.last_update.elapsed() > Duration::from_secs(5) {
-            self.update_balances();
-            self.last_update = Instant::now();
-        }
-        
-        // Update price and check stability less frequently (every 30 seconds)
+        // We are no longer calling self.update_balances() every 5 seconds,
+        // because we now rely on stable channel data for the user’s UI balance.
+
+        // Update stable channel & price every 30 seconds
         if self.last_stability_check.elapsed() > Duration::from_secs(30) {
-            // Get price once and use it for both operations
             if let Ok(latest_price) = get_latest_price(&ureq::Agent::new()) {
                 self.btc_price = latest_price;
-                
-                // Update the stable channel's price
                 self.stable_channel.latest_price = latest_price;
                 
-                // Call the stability check from stable.rs
+                // Run stability check on the stable channel
                 crate::stable::check_stability(&self.node, &mut self.stable_channel);
-                
-                // Update USD balance with new price
-                self.update_balances();
+
+                // Record time so we can display “last updated X seconds ago”
+                self.last_update = Instant::now();
             }
-            
             self.last_stability_check = Instant::now();
         }
         

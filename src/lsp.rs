@@ -64,7 +64,7 @@ impl LspApp {
             min_channel_lifetime: 100,
             max_client_to_self_delay: 1024,
             min_payment_size_msat: 0,
-            max_payment_size_msat: 1_000_000_000,
+            max_payment_size_msat: 10_000_000_000,
         };
         
         builder.set_liquidity_provider_lsps2(service_config);
@@ -362,7 +362,6 @@ impl LspApp {
                     
                     ui.add_space(20.0);
                     
-                    // Get Invoice
                     ui.group(|ui| {
                         ui.label("Generate Invoice");
                         ui.horizontal(|ui| {
