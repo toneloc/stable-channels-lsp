@@ -1,4 +1,5 @@
 pub mod price_feeds;
+pub mod types;
 
 #[cfg(feature = "user")]
 mod user;

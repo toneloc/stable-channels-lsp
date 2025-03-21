@@ -9,7 +9,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use image::{GrayImage, Luma};
 use qrcode::{QrCode, Color};
+
+use std::str::FromStr;
+
 use egui::TextureOptions;
+use crate::price_feeds::get_latest_price;
+use crate::types::*;
 
 // Configuration constants
 #[cfg(feature = "user")]
@@ -31,7 +36,7 @@ const DEFAULT_LSP_AUTH: &str = "00000000000000000000000000000000";
 
 /// The main app state for the user interface
 #[cfg(feature = "user")]
-struct StableChannelsApp {
+struct UserApp {
     node: Node,
     balance_btc: f64,
     balance_usd: f64,
@@ -46,7 +51,7 @@ struct StableChannelsApp {
 }
 
 #[cfg(feature = "user")]
-impl StableChannelsApp {
+impl UserApp {
     fn new() -> Self {
         println!("Initializing user node...");
         
@@ -154,6 +159,18 @@ impl StableChannelsApp {
         }
         
         println!("User node started with ID: {}", node.node_id());
+
+        // connect to exchange node
+        let target_node_id = "037639cf15e5a71adf33c4e92522aa17de79773d18d870ba17f100a3728dbab0e6";
+        if let Ok(pubkey) = PublicKey::from_str(target_node_id) {
+            let socket_addr = SocketAddress::from_str("127.0.0.1:9735").unwrap(); 
+            match node.connect(pubkey, socket_addr, true) {
+                Ok(_) => println!("Successfully connected to node: {}", target_node_id),
+                Err(e) => println!("Failed to connect to node: {}", e),
+            }
+        } else {
+            println!("Failed to parse node ID: {}", target_node_id);
+        }
         
         let show_onboarding = node.list_channels().is_empty();
         
@@ -179,7 +196,7 @@ impl StableChannelsApp {
     
         // Default to 20k sats (~$10-12 at current prices)
         let result = self.node.bolt11_payment().receive_via_jit_channel(
-            20_000_000, // 20k sats in msats
+            2_000_000, // 20k sats in msats
             &description,
             3600, // 1 hour expiry
             Some(10_000_000), // minimum channel size of 10k sats
@@ -446,19 +463,41 @@ impl StableChannelsApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
+                let balances = self.node.list_balances();
+                let lightning_balance_btc = Bitcoin::from_sats(balances.total_lightning_balance_sats);
+                let latest_price = get_latest_price(&ureq::Agent::new()).unwrap_or(55000.0);
+                let lightning_balance_usd = USD::from_bitcoin(lightning_balance_btc, latest_price);
+      
+                ui.add_space(30.0);
+
                 ui.group(|ui| {
+                    ui.add_space(20.0);
                     ui.heading("Your Stable Balance");
-                    ui.add_space(5.0);
-                    ui.heading(format!("${:.2}", self.balance_usd));
-                    ui.label(format!("BTC: {:.8}", self.balance_btc));
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(lightning_balance_usd.to_string())
+                            .size(36.0)
+                            .strong(),
+                    ));
+                    ui.label(format!("Agreed Peg USD: {}", self.stable_channel.expected_usd));
+                    ui.label(format!("Bitcoin: {}", lightning_balance_btc.to_string()));
+                    ui.add_space(20.0);
                 });
-                
+
                 ui.add_space(20.0);
-                
+
                 ui.group(|ui| {
+                    ui.add_space(20.0);
                     ui.heading("Bitcoin Price");
+                    ui.label(format!("${:.2}", latest_price));
+                    ui.add_space(20.0);
+
+                    let last_updated = self.last_update.elapsed().as_secs();
                     ui.add_space(5.0);
-                    ui.label(format!("${:.2}", self.btc_price));
+                    ui.label(
+                        egui::RichText::new(format!("Last updated: {}s ago", last_updated))
+                            .size(12.0)
+                            .color(egui::Color32::GRAY),
+                    );
                 });
                 
                 ui.add_space(20.0);
@@ -511,7 +550,7 @@ impl StableChannelsApp {
 }
 
 #[cfg(feature = "user")]
-impl App for StableChannelsApp {
+impl App for UserApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         // Poll for LDK node events
         self.poll_events();
@@ -551,7 +590,7 @@ pub fn run() {
         native_options,
         Box::new(|_cc| {
             // Create the app with initialized LDK node and wrap in Ok()
-            Ok(Box::new(StableChannelsApp::new()))
+            Ok(Box::new(UserApp::new()))
         }),
     ).unwrap_or_else(|e| {
         eprintln!("Error starting the application: {:?}", e);

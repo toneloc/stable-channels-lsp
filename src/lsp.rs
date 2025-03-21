@@ -240,77 +240,184 @@ impl LspApp {
             self.channel_info = info;
         }
     }
-
+    
     fn show_lsp_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading("Lightning Service Provider");
-                ui.add_space(10.0);
-                
-                // Node information
-                ui.group(|ui| {
-                    ui.label(format!("Node ID: {}", self.node.node_id()));
-                    ui.label(format!("Listening on: 127.0.0.1:{}", LSP_PORT));
-                });
-                
-                ui.add_space(20.0);
-                
-                // NEW BALANCE SECTION
-                ui.group(|ui| {
-                    ui.heading("Balances");
-                    ui.add_space(5.0);
+            // Add a scrollable area that encompasses the entire central panel
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading("Lightning Service Provider");
+                    ui.add_space(10.0);
                     
-                    // Lightning balance
-                    ui.horizontal(|ui| {
-                        ui.label("Lightning:");
-                        ui.monospace(format!("{:.8} BTC", self.lightning_balance_btc));
-                        ui.monospace(format!("(${:.2})", self.lightning_balance_usd));
+                    // Node information
+                    ui.group(|ui| {
+                        ui.label(format!("Node ID: {}", self.node.node_id()));
+                        ui.label(format!("Listening on: 127.0.0.1:{}", LSP_PORT));
                     });
                     
-                    // On-chain balance
-                    ui.horizontal(|ui| {
-                        ui.label("On-chain:  ");
-                        ui.monospace(format!("{:.8} BTC", self.onchain_balance_btc));
-                        ui.monospace(format!("(${:.2})", self.onchain_balance_usd));
+                    ui.add_space(20.0);
+                    
+                    // BALANCE SECTION
+                    ui.group(|ui| {
+                        ui.heading("Balances");
+                        ui.add_space(5.0);
+                        
+                        // Lightning balance
+                        ui.horizontal(|ui| {
+                            ui.label("Lightning:");
+                            ui.monospace(format!("{:.8} BTC", self.lightning_balance_btc));
+                            ui.monospace(format!("(${:.2})", self.lightning_balance_usd));
+                        });
+                        
+                        // On-chain balance
+                        ui.horizontal(|ui| {
+                            ui.label("On-chain:  ");
+                            ui.monospace(format!("{:.8} BTC", self.onchain_balance_btc));
+                            ui.monospace(format!("(${:.2})", self.onchain_balance_usd));
+                        });
+                        
+                        // Total balance
+                        ui.horizontal(|ui| {
+                            ui.label("Total:     ");
+                            ui.strong(format!("{:.8} BTC", self.total_balance_btc));
+                            ui.strong(format!("(${:.2})", self.total_balance_usd));
+                        });
+                        
+                        ui.add_space(5.0);
+                        ui.label(format!("Price: ${:.2} | Updated: {} seconds ago", 
+                                         self.btc_price,
+                                         self.last_update.elapsed().as_secs()));
                     });
                     
-                    // Total balance
-                    ui.horizontal(|ui| {
-                        ui.label("Total:     ");
-                        ui.strong(format!("{:.8} BTC", self.total_balance_btc));
-                        ui.strong(format!("(${:.2})", self.total_balance_usd));
+                    ui.add_space(20.0);
+                    
+                    // Get Invoice
+                    ui.group(|ui| {
+                        ui.label("Generate Invoice");
+                        ui.horizontal(|ui| {
+                            ui.label("Amount (sats):");
+                            ui.text_edit_singleline(&mut self.invoice_amount);
+                            if ui.button("Get Invoice").clicked() {
+                                if let Ok(amount) = self.invoice_amount.parse::<u64>() {
+                                    let msats = amount * 1000;
+                                    match self.node.bolt11_payment().receive(
+                                        msats,
+                                        &ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+                                            ldk_node::lightning_invoice::Description::new("LSP Invoice".to_string()).unwrap()
+                                        ),
+                                        3600,
+                                    ) {
+                                        Ok(invoice) => {
+                                            self.invoice_result = invoice.to_string();
+                                            self.status_message = "Invoice generated".to_string();
+                                        },
+                                        Err(e) => {
+                                            self.status_message = format!("Error: {}", e);
+                                        }
+                                    }
+                                } else {
+                                    self.status_message = "Invalid amount".to_string();
+                                }
+                            }
+                        });
+                        
+                        if !self.invoice_result.is_empty() {
+                            ui.text_edit_multiline(&mut self.invoice_result);
+                            if ui.button("Copy").clicked() {
+                                ui.output_mut(|o| o.copied_text = self.invoice_result.clone());
+                            }
+                        }
                     });
                     
-                    ui.add_space(5.0);
-                    ui.label(format!("Price: ${:.2} | Updated: {} seconds ago", 
-                                     self.btc_price,
-                                     self.last_update.elapsed().as_secs()));
-                });
-                
-                ui.add_space(20.0);
-                
-                // Get Invoice
-                ui.group(|ui| {
-                    ui.label("Generate Invoice");
-                    ui.horizontal(|ui| {
-                        ui.label("Amount (sats):");
-                        ui.text_edit_singleline(&mut self.invoice_amount);
-                        if ui.button("Get Invoice").clicked() {
-                            if let Ok(amount) = self.invoice_amount.parse::<u64>() {
-                                let msats = amount * 1000;
-                                match self.node.bolt11_payment().receive(
-                                    msats,
-                                    &ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
-                                        ldk_node::lightning_invoice::Description::new("LSP Invoice".to_string()).unwrap()
-                                    ),
-                                    3600,
-                                ) {
-                                    Ok(invoice) => {
-                                        self.invoice_result = invoice.to_string();
-                                        self.status_message = "Invoice generated".to_string();
+                    ui.add_space(10.0);
+                    
+                    // Pay Invoice
+                    ui.group(|ui| {
+                        ui.label("Pay Invoice");
+                        ui.text_edit_multiline(&mut self.invoice_to_pay);
+                        if ui.button("Pay Invoice").clicked() {
+                            match Bolt11Invoice::from_str(&self.invoice_to_pay) {
+                                Ok(invoice) => {
+                                    match self.node.bolt11_payment().send(&invoice, None) {
+                                        Ok(payment_id) => {
+                                            self.status_message = format!("Payment sent, ID: {}", payment_id);
+                                            self.invoice_to_pay.clear();
+                                            // Update balances after payment
+                                            self.update_balances();
+                                        },
+                                        Err(e) => {
+                                            self.status_message = format!("Payment error: {}", e);
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    self.status_message = format!("Invalid invoice: {}", e);
+                                }
+                            }
+                        }
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    // Get Address
+                    ui.group(|ui| {
+                        ui.label("On-chain Address");
+                        if ui.button("Get Address").clicked() {
+                            match self.node.onchain_payment().new_address() {
+                                Ok(address) => {
+                                    self.on_chain_address = address.to_string();
+                                    self.status_message = "Address generated".to_string();
+                                },
+                                Err(e) => {
+                                    self.status_message = format!("Error: {}", e);
+                                }
+                            }
+                        }
+                        
+                        if !self.on_chain_address.is_empty() {
+                            ui.label(self.on_chain_address.clone());
+                            if ui.button("Copy").clicked() {
+                                ui.output_mut(|o| o.copied_text = self.on_chain_address.clone());
+                            }
+                        }
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    // On-chain Send
+                    ui.group(|ui| {
+                        ui.label("On-chain Send");
+                        ui.horizontal(|ui| {
+                            ui.label("Address:");
+                            ui.text_edit_singleline(&mut self.on_chain_address);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Amount (sats):");
+                            ui.text_edit_singleline(&mut self.on_chain_amount);
+                        });
+                        
+                        if ui.button("Send On-chain").clicked() {
+                            if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
+                                match Address::from_str(&self.on_chain_address) {
+                                    Ok(addr) => match addr.require_network(Network::Signet) {
+                                        Ok(addr_checked) => {
+                                            match self.node.onchain_payment().send_to_address(&addr_checked, amount, None) {
+                                                Ok(txid) => {
+                                                    self.status_message = format!("Transaction sent: {}", txid);
+                                                    // Update balances after sending
+                                                    self.update_balances();
+                                                },
+                                                Err(e) => {
+                                                    self.status_message = format!("Transaction error: {}", e);
+                                                }
+                                            }
+                                        },
+                                        Err(_) => {
+                                            self.status_message = "Invalid address for this network".to_string();
+                                        }
                                     },
-                                    Err(e) => {
-                                        self.status_message = format!("Error: {}", e);
+                                    Err(_) => {
+                                        self.status_message = "Invalid address".to_string();
                                     }
                                 }
                             } else {
@@ -319,129 +426,25 @@ impl LspApp {
                         }
                     });
                     
-                    if !self.invoice_result.is_empty() {
-                        ui.text_edit_multiline(&mut self.invoice_result);
-                        if ui.button("Copy").clicked() {
-                            ui.output_mut(|o| o.copied_text = self.invoice_result.clone());
-                        }
-                    }
-                });
-                
-                ui.add_space(10.0);
-                
-                // Pay Invoice
-                ui.group(|ui| {
-                    ui.label("Pay Invoice");
-                    ui.text_edit_multiline(&mut self.invoice_to_pay);
-                    if ui.button("Pay Invoice").clicked() {
-                        match Bolt11Invoice::from_str(&self.invoice_to_pay) {
-                            Ok(invoice) => {
-                                match self.node.bolt11_payment().send(&invoice, None) {
-                                    Ok(payment_id) => {
-                                        self.status_message = format!("Payment sent, ID: {}", payment_id);
-                                        self.invoice_to_pay.clear();
-                                        // Update balances after payment
-                                        self.update_balances();
-                                    },
-                                    Err(e) => {
-                                        self.status_message = format!("Payment error: {}", e);
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                self.status_message = format!("Invalid invoice: {}", e);
-                            }
-                        }
-                    }
-                });
-                
-                ui.add_space(10.0);
-                
-                // Get Address
-                ui.group(|ui| {
-                    ui.label("On-chain Address");
-                    if ui.button("Get Address").clicked() {
-                        match self.node.onchain_payment().new_address() {
-                            Ok(address) => {
-                                self.on_chain_address = address.to_string();
-                                self.status_message = "Address generated".to_string();
-                            },
-                            Err(e) => {
-                                self.status_message = format!("Error: {}", e);
-                            }
-                        }
-                    }
+                    ui.add_space(10.0);
                     
-                    if !self.on_chain_address.is_empty() {
-                        ui.label(self.on_chain_address.clone());
-                        if ui.button("Copy").clicked() {
-                            ui.output_mut(|o| o.copied_text = self.on_chain_address.clone());
+                    // List Channels
+                    ui.group(|ui| {
+                        ui.label("Channels");
+                        if ui.button("Refresh Channel List").clicked() {
+                            self.update_channel_info();
                         }
-                    }
-                });
-                
-                ui.add_space(10.0);
-                
-                // On-chain Send
-                ui.group(|ui| {
-                    ui.label("On-chain Send");
-                    ui.horizontal(|ui| {
-                        ui.label("Address:");
-                        ui.text_edit_singleline(&mut self.on_chain_address);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Amount (sats):");
-                        ui.text_edit_singleline(&mut self.on_chain_amount);
+                        
+                        ui.text_edit_multiline(&mut self.channel_info);
                     });
                     
-                    if ui.button("Send On-chain").clicked() {
-                        if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
-                            match Address::from_str(&self.on_chain_address) {
-                                Ok(addr) => match addr.require_network(Network::Signet) {
-                                    Ok(addr_checked) => {
-                                        match self.node.onchain_payment().send_to_address(&addr_checked, amount, None) {
-                                            Ok(txid) => {
-                                                self.status_message = format!("Transaction sent: {}", txid);
-                                                // Update balances after sending
-                                                self.update_balances();
-                                            },
-                                            Err(e) => {
-                                                self.status_message = format!("Transaction error: {}", e);
-                                            }
-                                        }
-                                    },
-                                    Err(_) => {
-                                        self.status_message = "Invalid address for this network".to_string();
-                                    }
-                                },
-                                Err(_) => {
-                                    self.status_message = "Invalid address".to_string();
-                                }
-                            }
-                        } else {
-                            self.status_message = "Invalid amount".to_string();
-                        }
-                    }
-                });
-                
-                ui.add_space(10.0);
-                
-                // List Channels
-                ui.group(|ui| {
-                    ui.label("Channels");
-                    if ui.button("Refresh Channel List").clicked() {
-                        self.update_channel_info();
-                    }
+                    ui.add_space(10.0);
                     
-                    ui.text_edit_multiline(&mut self.channel_info);
+                    // Status message
+                    if !self.status_message.is_empty() {
+                        ui.label(self.status_message.clone());
+                    }
                 });
-                
-                ui.add_space(10.0);
-                
-                // Status message
-                if !self.status_message.is_empty() {
-                    ui.label(self.status_message.clone());
-                }
             });
         });
     }
