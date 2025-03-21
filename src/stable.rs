@@ -163,86 +163,78 @@ pub fn initialize_stable_channel(
 }
 
 /// Check if the stable channel is in balance and determine what action to take
-pub fn check_stability(node: &Node, sc: StableChannel, is_initialized: bool) -> (StabilityAction, StableChannel) {
-    let default_channel_id = ChannelId::from_bytes([0; 32]);
+pub fn check_stability(node: &Node, sc: &mut StableChannel) {
+    let (success, updated_sc) = update_balances(node, sc.clone());
     
-    // If we're not initialized and have a non-default channel ID but it's not found
-    if !is_initialized && sc.channel_id != default_channel_id && !channel_exists(node, &sc.channel_id) {
-        println!("Stable channel with ID {} not found or not properly initialized", sc.channel_id);
-        return (StabilityAction::NotInitialized, sc);
+    // If update was successful, copy the updated values back to our mutable reference
+    if success {
+        *sc = updated_sc;
     }
-    
-    // If we're not initialized and have a default channel ID and there are no channels
-    if !is_initialized && sc.channel_id == default_channel_id && node.list_channels().is_empty() {
-        println!("No channels available. Please create a channel first.");
-        return (StabilityAction::NotInitialized, sc);
-    }
-    
-    // Update the price and balances
-    let mut updated_sc = sc.clone();
-    let agent = Agent::new();
-    updated_sc.latest_price = get_latest_price(&agent);
-    
-    // Try to update balances
-    let (balances_updated, updated_sc) = update_balances(node, updated_sc);
-    if !balances_updated {
-        return (StabilityAction::NotInitialized, updated_sc);
-    }
-    
-    // Print the current state
-    println!("{:<25} ${:>15.2}", "BTC/USD Price:", updated_sc.latest_price);
-    println!("{:<25} {:>15}", "Expected USD:", updated_sc.expected_usd);
-    println!("{:<25} {:>15}", "User USD:", updated_sc.stable_receiver_usd);
-    
-    // Check for division by zero - if expected_usd is 0, we can't calculate difference
-    if updated_sc.expected_usd.0 == 0.0 {
-        println!("Expected USD amount is zero. Cannot calculate stability difference.");
-        return (StabilityAction::NotInitialized, updated_sc);
-    }
-    
-    // Calculate difference from expected value
-    let dollars_from_par: USD = updated_sc.stable_receiver_usd - updated_sc.expected_usd;
-    let percent_from_par = ((dollars_from_par / updated_sc.expected_usd) * 100.0).abs();
-    
-    println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%", percent_from_par));
-    println!("{:<25} {:>15}", "User BTC:", updated_sc.stable_receiver_btc);
-    println!("{:<25} {:>15}", "LSP USD:", updated_sc.stable_provider_usd);
-    println!("{:<25} {:>15}", "LSP BTC:", updated_sc.stable_provider_btc);
-    
-    // Determine action based on conditions
-    let action = if percent_from_par < 0.1 {
-        println!("\nDifference from par less than 0.1%. Doing nothing.");
-        StabilityAction::DoNothing
-    } else {
-        let is_receiver_below_expected = updated_sc.stable_receiver_usd < updated_sc.expected_usd;
 
-        match (updated_sc.is_stable_receiver, is_receiver_below_expected, updated_sc.risk_level > 100) {
-            (_, _, true) => {
-                println!("Risk level high. Current risk level: {}", updated_sc.risk_level);
-                StabilityAction::HighRisk(updated_sc.risk_level as u32)
-            },
-            (true, true, false) => {
-                println!("\nWaiting for payment from counterparty...");
-                StabilityAction::Wait
-            },
-            (true, false, false) => {
-                println!("\nPaying the difference...");
-                let amt = USD::to_msats(dollars_from_par, updated_sc.latest_price);
-                StabilityAction::Pay(amt)
-            },
-            (false, true, false) => {
-                println!("\nPaying the difference...");
-                let amt = USD::to_msats(dollars_from_par, updated_sc.latest_price);
-                StabilityAction::Pay(amt)
-            },
-            (false, false, false) => {
-                println!("\nWaiting for payment from counterparty...");
-                StabilityAction::Wait
-            },
+    // Calculate stability
+    let dollars_from_par: USD = sc.stable_receiver_usd - sc.expected_usd;
+    let percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
+
+    println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
+    println!("{:<25} {:>15}", "User USD:", sc.stable_receiver_usd);
+    println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
+
+    println!("{:<25} {:>15}", "User BTC:", sc.stable_receiver_btc);
+    println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
+
+    enum Action {
+        Wait,
+        Pay,
+        DoNothing,
+        HighRisk,
+    }
+
+    let action = if percent_from_par < 0.1 {
+        Action::DoNothing
+    } else {
+        let is_receiver_below_expected: bool = sc.stable_receiver_usd < sc.expected_usd;
+
+        match (sc.is_stable_receiver, is_receiver_below_expected, sc.risk_level > 100) {
+            (_, _, true) => Action::HighRisk, // High risk scenario
+            (true, true, false) => Action::Wait,   // We are User and below peg, wait for payment
+            (true, false, false) => Action::Pay,   // We are User and above peg, need to pay
+            (false, true, false) => Action::Pay,   // We are LSP and below peg, need to pay
+            (false, false, false) => Action::Wait, // We are LSP and above peg, wait for payment
         }
     };
-    
-    (action, updated_sc)
+
+    match action {
+        Action::DoNothing => {
+            println!("\nDifference from par less than 0.1%. Doing nothing.");
+            // We could set a flag here to indicate stability
+        }
+        Action::Wait => {
+            println!("\nWaiting for payment...");
+            // Update some state to indicate we're waiting
+        }
+        Action::Pay => {
+            println!("\nPaying the difference...\n");
+
+            let amt = USD::to_msats(dollars_from_par, sc.latest_price);
+
+            // Perform payment logic
+            let result = node
+                .spontaneous_payment()
+                .send(amt, sc.counterparty, None);
+                
+            match result {
+                Ok(payment_id) => {
+                    println!("Payment sent successfully with payment ID: {}", payment_id);
+                    sc.payment_made = true;  // Set flag to indicate payment was made
+                },
+                Err(e) => println!("Failed to send payment: {}", e),
+            }
+        }
+        Action::HighRisk => {
+            println!("Risk level high. Current risk level: {}", sc.risk_level);
+            // Update some state to indicate high risk
+        }
+    }
 }
 
 /// Execute a payment to maintain stability

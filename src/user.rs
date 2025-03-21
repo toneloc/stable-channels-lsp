@@ -1,29 +1,40 @@
-use std::str::FromStr;
-use std::time::{Duration, Instant};
+#[cfg(feature = "user")]
 use eframe::{egui, App, Frame};
-use image::{GrayImage, Luma};
-use qrcode::{QrCode, Color};
 use ldk_node::{
     bitcoin::{secp256k1::PublicKey, Network},
     lightning::ln::msgs::SocketAddress,
     Builder, Node, Event
 };
-use ureq::Agent;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use image::{GrayImage, Luma};
+use qrcode::{QrCode, Color};
 
+use std::str::FromStr;
+
+use egui::TextureOptions;
 use crate::price_feeds::get_latest_price;
 use crate::types::*;
-use crate::stable; // Add this import
 
 // Configuration constants
+#[cfg(feature = "user")]
 const USER_DATA_DIR: &str = "data/user";
+#[cfg(feature = "user")]
 const USER_NODE_ALIAS: &str = "user";
+#[cfg(feature = "user")]
 const USER_PORT: u16 = 9736;
+#[cfg(feature = "user")]
 const DEFAULT_NETWORK: &str = "signet";
+#[cfg(feature = "user")]
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
+#[cfg(feature = "user")]
 const DEFAULT_LSP_PUBKEY: &str = "02fe1194d6359a045419c88304bc9bd77de4b4b19f22f5160f0ca7eb722bd86d27";
+#[cfg(feature = "user")]
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
+#[cfg(feature = "user")]
 const DEFAULT_LSP_AUTH: &str = "00000000000000000000000000000000";
-const DEFAULT_EXPECTED_USD: f64 = 20.0; // Default stable channel amount
+#[cfg(feature = "user")]
+const EXPECTED_USD: f64 = 1.0;
 
 /// The main app state for the user interface
 #[cfg(feature = "user")]
@@ -35,11 +46,9 @@ struct UserApp {
     show_onboarding: bool,
     last_update: Instant,
     status_message: String,
-    // Added fields for invoice and QR code
     invoice_result: String,
     qr_texture: Option<egui::TextureHandle>,
     waiting_for_payment: bool,
-    // Added stable channel fields
     stable_channel: StableChannel,
     is_stable_channel_initialized: bool,
     last_stability_check: Instant,
@@ -51,7 +60,7 @@ impl UserApp {
         println!("Initializing user node...");
         
         // Ensure data directory exists
-        let data_dir = std::path::PathBuf::from(USER_DATA_DIR);
+        let data_dir = PathBuf::from(USER_DATA_DIR);
         if !data_dir.exists() {
             std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| {
                 eprintln!("Warning: Failed to create data directory: {}", e);
@@ -167,12 +176,15 @@ impl UserApp {
             println!("Failed to parse node ID: {}", target_node_id);
         }
         
-        // Initialize stable channel (we'll try to set it up when a channel is created)
-        let stable_channel = StableChannel::default();
-        
         let show_onboarding = node.list_channels().is_empty();
-        let is_stable_channel_initialized = false;
         
+        let mut stable_channel = StableChannel::default();
+        stable_channel.expected_usd = USD::from_f64(EXPECTED_USD);
+        let is_stable_channel_initialized = false;
+
+        let channels = node.list_channels();
+        let show_onboarding = channels.is_empty();
+    
         Self {
             node,
             balance_btc: 0.0,
@@ -190,86 +202,71 @@ impl UserApp {
         }
     }
     
-    // Add stability check function
-    fn check_stability(&mut self) {
-        if self.last_stability_check.elapsed() >= Duration::from_secs(30) {
-            // If we have no channels, don't try to check stability
-            if self.node.list_channels().is_empty() {
-                return;
-            }
-            
-            if !self.is_stable_channel_initialized {
-                // Try to initialize with first channel
-                let channels = self.node.list_channels();
-                if let Some(channel) = channels.first() {
-                    // Initialize the stable channel
-                    match stable::initialize_stable_channel(
-                        &self.node,
-                        self.stable_channel.clone(),
-                        &channel.channel_id.to_string(),
-                        true, // We're the stable receiver
-                        DEFAULT_EXPECTED_USD,
-                        0.0 // No native bitcoin amount
-                    ) {
-                        Ok(updated_channel) => {
-                            self.stable_channel = updated_channel;
-                            self.is_stable_channel_initialized = true;
-                            self.status_message = "Stable channel initialized".to_string();
-                        },
-                        Err(e) => {
-                            self.status_message = format!("Failed to initialize stable channel: {}", e);
-                        }
-                    }
-                }
-            } else {
-                // Run stability check on existing channel
-                let (action, updated_channel) = stable::check_stability(
-                    &self.node,
-                    self.stable_channel.clone(),
-                    self.is_stable_channel_initialized
+    fn get_jit_invoice(&mut self, ctx: &egui::Context) {
+        let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+            ldk_node::lightning_invoice::Description::new("Stable Channel JIT payment".to_string()).unwrap()
+        );
+        
+    
+        // Default to 20k sats (~$10-12 at current prices)
+        let result = self.node.bolt11_payment().receive_via_jit_channel(
+            2_000_000, // 20k sats in msats
+            &description,
+            3600, // 1 hour expiry
+            Some(10_000_000), // minimum channel size of 10k sats
+        );
+    
+        match result {
+            Ok(invoice) => {
+                self.invoice_result = invoice.to_string();
+                
+                // Generate QR code
+                let code = QrCode::new(&self.invoice_result).unwrap();
+                let bits = code.to_colors();
+                let width = code.width();
+                let scale_factor = 4;
+                let mut imgbuf = GrayImage::new(
+                    (width * scale_factor) as u32, 
+                    (width * scale_factor) as u32
                 );
-                
-                // Update our stored channel
-                self.stable_channel = updated_channel;
-                
-                // Handle the stability action
-                match action {
-                    stable::StabilityAction::Pay(amount) => {
-                        self.status_message = "Paying to maintain stability...".to_string();
-                        
-                        match stable::execute_payment(&self.node, amount, &self.stable_channel) {
-                            Ok(payment_id) => {
-                                self.status_message = format!("Stability payment sent: {}", payment_id);
-                            },
-                            Err(e) => {
-                                self.status_message = format!("Stability payment failed: {}", e);
+    
+                for y in 0..width {
+                    for x in 0..width {
+                        let color = if bits[y * width + x] == Color::Dark { 0 } else { 255 };
+                        for dy in 0..scale_factor {
+                            for dx in 0..scale_factor {
+                                imgbuf.put_pixel(
+                                    (x * scale_factor + dx) as u32,
+                                    (y * scale_factor + dy) as u32,
+                                    Luma([color]),
+                                );
                             }
                         }
-                    },
-                    stable::StabilityAction::Wait => {
-                        self.status_message = "Waiting for counterparty payment to maintain stability...".to_string();
-                    },
-                    stable::StabilityAction::DoNothing => {
-                        self.status_message = "Channel is stable.".to_string();
-                    },
-                    stable::StabilityAction::HighRisk(risk) => {
-                        self.status_message = format!("Channel has high risk level: {}", risk);
-                    },
-                    stable::StabilityAction::NotInitialized => {
-                        // Channel may have been closed
-                        self.is_stable_channel_initialized = false;
-                        self.status_message = "Stable channel no longer valid.".to_string();
                     }
                 }
+                
+                // Convert to egui texture
+                let (w, h) = (imgbuf.width() as usize, imgbuf.height() as usize);
+                let mut rgba = Vec::with_capacity(w * h * 4);
+                for pixel in imgbuf.pixels() {
+                    let lum = pixel[0];
+                    rgba.push(lum);
+                    rgba.push(lum);
+                    rgba.push(lum);
+                    rgba.push(255);
+                }
+                
+                let color_image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+                self.qr_texture = Some(ctx.load_texture("qr_code", color_image, TextureOptions::LINEAR));
+                
+                self.status_message = "Invoice generated. Pay it to create a JIT channel.".to_string();
+                self.waiting_for_payment = true;
             }
-            
-            self.last_stability_check = Instant::now();
+            Err(e) => {
+                self.invoice_result = format!("Error: {e:?}");
+                self.status_message = format!("Failed to generate invoice: {}", e);
+            }
         }
-    }
-    
-    // Existing functions...
-    fn get_jit_invoice(&mut self, ctx: &egui::Context) {
-        // Existing code...
     }
     
     fn poll_events(&mut self) {
@@ -278,47 +275,19 @@ impl UserApp {
                 Event::ChannelReady { channel_id, .. } => {
                     self.status_message = format!("Channel {} is now ready", channel_id);
                     self.show_onboarding = false;
-                    self.waiting_for_payment = false; // Exit payment screen if we were waiting
-                    
-                    // Try to initialize stable channel if not already initialized
-                    if !self.is_stable_channel_initialized {
-                        // Initialize the stable channel with this channel
-                        match stable::initialize_stable_channel(
-                            &self.node,
-                            self.stable_channel.clone(),
-                            &channel_id.to_string(),
-                            true, // We're the stable receiver
-                            DEFAULT_EXPECTED_USD,
-                            0.0 // No native bitcoin amount
-                        ) {
-                            Ok(updated_channel) => {
-                                self.stable_channel = updated_channel;
-                                self.is_stable_channel_initialized = true;
-                                self.status_message = "Stable channel initialized".to_string();
-                            },
-                            Err(e) => {
-                                self.status_message = format!("Failed to initialize stable channel: {}", e);
-                            }
-                        }
-                    }
+                    self.waiting_for_payment = false; 
                 }
                 
                 Event::PaymentReceived { amount_msat, .. } => {
                     self.status_message = format!("Received payment of {} msats", amount_msat);
-                    // Move to main screen if we were waiting
-                    if self.waiting_for_payment {
-                        self.waiting_for_payment = false;
-                    }
+
+                    // if self.waiting_for_payment {
+                    //     self.waiting_for_payment = false;
+                    // }
                 }
                 
                 Event::ChannelClosed { channel_id, .. } => {
                     self.status_message = format!("Channel {} has been closed", channel_id);
-                    
-                    // If this was our stable channel, mark as uninitialized
-                    if self.is_stable_channel_initialized && channel_id == self.stable_channel.channel_id {
-                        self.is_stable_channel_initialized = false;
-                    }
-                    
                     // If no channels left, go back to onboarding
                     if self.node.list_channels().is_empty() {
                         self.show_onboarding = true;
@@ -334,28 +303,162 @@ impl UserApp {
     
     fn update_balances(&mut self) {
         let balances = self.node.list_balances();
-        // Convert from sats to BTC
         self.balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
-        
-        // Get the latest BTC price
-        if let Ok(latest_price) = get_latest_price(&Agent::new()) {
-            self.btc_price = latest_price;
-            // Update the stable channel price too if initialized
-            if self.is_stable_channel_initialized {
-                self.stable_channel.latest_price = latest_price;
-            }
-        }
-        
-        // Calculate USD value
         self.balance_usd = self.balance_btc * self.btc_price;
     }
 
     fn show_waiting_for_payment_screen(&mut self, ctx: &egui::Context) {
-        // Existing code...
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(10.0);
+
+            ui.vertical_centered(|ui| {
+                ui.heading(
+                    egui::RichText::new("Send yourself bitcoin to stabilize.")
+                        .size(16.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+                ui.add_space(3.0);
+                ui.label("This is a Bolt11 Lightning invoice.");
+                ui.add_space(8.0);
+
+                if let Some(ref qr) = self.qr_texture {
+                    ui.image(qr);
+                } else {
+                    ui.label("Lightning QR Missing");
+                }
+
+                ui.add_space(8.0);
+
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.invoice_result)
+                        .frame(true)
+                        .desired_width(400.0)
+                        .desired_rows(3)
+                        .hint_text("Invoice..."),
+                );
+
+                ui.add_space(8.0);
+
+                if ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("Copy Invoice")
+                            .color(egui::Color32::BLACK)
+                            .size(16.0), 
+                    )
+                    .min_size(egui::vec2(120.0, 36.0))
+                    .fill(egui::Color32::from_gray(220))
+                    .rounding(6.0),
+                ).clicked() {
+                    ui.output_mut(|o| {
+                        o.copied_text = self.invoice_result.clone();
+                    });
+                }
+                
+                ui.add_space(5.0); 
+                
+                if ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("Back")
+                            .color(egui::Color32::BLACK)
+                            .size(16.0), 
+                    )
+                    .min_size(egui::vec2(120.0, 36.0))
+                    .fill(egui::Color32::from_gray(220))
+                    .rounding(6.0), 
+                ).clicked() {
+                    self.waiting_for_payment = false;
+                }
+                
+                ui.add_space(8.0); 
+            });
+        });
     }
 
     fn show_onboarding_screen(&mut self, ctx: &egui::Context) {
-        // Existing code...
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.heading(
+                    egui::RichText::new("Stable Channels v0.1")
+                        .size(28.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+                ui.add_space(50.0);
+    
+                // Step 1
+                ui.heading(
+                    egui::RichText::new("Step 1: Get a Lightning invoice ⚡")
+                        .color(egui::Color32::WHITE),
+                );
+                ui.label(
+                    egui::RichText::new(r#"Press the "Stabilize" button below."#)
+                        .color(egui::Color32::GRAY),
+                );
+    
+                ui.add_space(20.0);
+    
+                // Step 2
+                ui.heading(
+                    egui::RichText::new("Step 2: Send yourself bitcoin 💸")
+                        .color(egui::Color32::WHITE),
+                );
+                ui.label(
+                    egui::RichText::new("Over Lightning, from an app or an exchange.")
+                        .color(egui::Color32::GRAY),
+                );
+    
+                ui.add_space(20.0);
+    
+                // Step 3
+                ui.heading(
+                    egui::RichText::new("Step 3: Stable channel created 🔧")
+                        .color(egui::Color32::WHITE),
+                );
+                ui.label(
+                    egui::RichText::new("Self-custody. Your keys, your coins.")
+                        .color(egui::Color32::GRAY),
+                );
+    
+                ui.add_space(50.0);
+    
+                // Create channel button
+                let subtle_orange = egui::Color32::from_rgba_premultiplied(247, 147, 26, 200); 
+                let create_channel_button = egui::Button::new(
+                    egui::RichText::new("Stabilize")
+                        .color(egui::Color32::WHITE)
+                        .strong()
+                        .size(18.0),
+                )
+                .min_size(egui::vec2(200.0, 55.0))
+                .fill(subtle_orange)
+                .rounding(8.0);
+    
+                if ui.add(create_channel_button).clicked() {
+                    self.status_message = "Getting JIT channel invoice...".to_string();
+                    self.get_jit_invoice(ctx);
+                }
+                
+                // Show status message if there is one
+                if !self.status_message.is_empty() {
+                    ui.add_space(20.0);
+                    ui.label(self.status_message.clone());
+                }
+                
+                // Show node ID
+                ui.add_space(20.0);
+                ui.horizontal(|ui| {
+                    ui.label("Node ID: ");
+                    let node_id = self.node.node_id().to_string();
+                    let node_id_short = format!("{}...{}", &node_id[0..10], &node_id[node_id.len()-10..]);
+                    ui.monospace(node_id_short);
+                    
+                    if ui.small_button("Copy").clicked() {
+                        ui.output_mut(|o| o.copied_text = node_id);
+                    }
+                });
+            });
+        });
     }
 
     fn show_main_screen(&mut self, ctx: &egui::Context) {
@@ -372,33 +475,27 @@ impl UserApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
+                let balances = self.node.list_balances();
+                let lightning_balance_btc = Bitcoin::from_sats(balances.total_lightning_balance_sats);
+                let lightning_balance_usd = USD::from_bitcoin(lightning_balance_btc, self.btc_price);
+      
                 ui.add_space(30.0);
 
-                // Stable balance display
                 ui.group(|ui| {
                     ui.add_space(20.0);
                     ui.heading("Your Stable Balance");
-                    
-                    if self.is_stable_channel_initialized {
-                        ui.add(egui::Label::new(
-                            egui::RichText::new(self.stable_channel.stable_receiver_usd.to_string())
-                                .size(36.0)
-                                .strong(),
-                        ));
-                        ui.label(format!("Agreed Peg USD: {}", self.stable_channel.expected_usd));
-                        ui.label(format!("Bitcoin: {}", self.stable_channel.stable_receiver_btc.to_string()));
-                    } else {
-                        ui.label("No stable channel initialized yet.");
-                        if !self.node.list_channels().is_empty() {
-                            ui.label("Stability check runs automatically every 30 seconds.");
-                        }
-                    }
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(lightning_balance_usd.to_string())
+                            .size(36.0)
+                            .strong(),
+                    ));
+                    ui.label(format!("Agreed Peg USD: {}", self.stable_channel.expected_usd));
+                    ui.label(format!("Bitcoin: {}", lightning_balance_btc.to_string()));
                     ui.add_space(20.0);
                 });
 
                 ui.add_space(20.0);
 
-                // Bitcoin price info
                 ui.group(|ui| {
                     ui.add_space(20.0);
                     ui.heading("Bitcoin Price");
@@ -431,15 +528,6 @@ impl UserApp {
                                 channel.channel_id, 
                                 channel.channel_value_sats
                             ));
-                            
-                            // Show if this is the stable channel
-                            if self.is_stable_channel_initialized && channel.channel_id == self.stable_channel.channel_id {
-                                ui.label(
-                                    egui::RichText::new("(Stable Channel)")
-                                        .italics()
-                                        .color(egui::Color32::GREEN)
-                                );
-                            }
                         }
                     }
                 });
@@ -478,14 +566,30 @@ impl App for UserApp {
         // Poll for LDK node events
         self.poll_events();
         
-        // Update balances periodically
+        // Update balances frequently (every 5 seconds)
         if self.last_update.elapsed() > Duration::from_secs(5) {
             self.update_balances();
             self.last_update = Instant::now();
         }
         
-        // Run stability check (this will only do something every 30 seconds)
-        self.check_stability();
+        // Update price and check stability less frequently (every 30 seconds)
+        if self.last_stability_check.elapsed() > Duration::from_secs(30) {
+            // Get price once and use it for both operations
+            if let Ok(latest_price) = get_latest_price(&ureq::Agent::new()) {
+                self.btc_price = latest_price;
+                
+                // Update the stable channel's price
+                self.stable_channel.latest_price = latest_price;
+                
+                // Call the stability check from stable.rs
+                crate::stable::check_stability(&self.node, &mut self.stable_channel);
+                
+                // Update USD balance with new price
+                self.update_balances();
+            }
+            
+            self.last_stability_check = Instant::now();
+        }
         
         // Show appropriate screen
         if self.waiting_for_payment {
