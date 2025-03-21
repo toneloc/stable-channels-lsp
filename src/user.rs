@@ -2,7 +2,7 @@
 use eframe::{egui, App, Frame};
 use ldk_node::{
     bitcoin::{secp256k1::PublicKey, Network},
-    lightning::ln::msgs::SocketAddress,
+    lightning::ln::msgs::SocketAddress, lightning_invoice::Bolt11Invoice,
     Builder, Node, Event
 };
 use std::path::PathBuf;
@@ -284,6 +284,7 @@ impl UserApp {
                 
                 Event::PaymentReceived { amount_msat, .. } => {
                     self.status_message = format!("Received payment of {} msats", amount_msat);
+                    crate::stable::check_stability(&self.node, &mut self.stable_channel);
                 }
                 
                 Event::ChannelClosed { channel_id, .. } => {
@@ -575,6 +576,32 @@ impl UserApp {
                         }
                     }
                 });
+
+                // Pay Invoice
+                ui.group(|ui| {
+                    ui.label("Pay Invoice");
+                    ui.text_edit_multiline(&mut self.invoice_to_pay);
+                    if ui.button("Pay Invoice").clicked() {
+                        match Bolt11Invoice::from_str(&self.invoice_to_pay) {
+                            Ok(invoice) => {
+                                match self.node.bolt11_payment().send(&invoice, None) {
+                                    Ok(payment_id) => {
+                                        self.status_message = format!("Payment sent, ID: {}", payment_id);
+                                        self.invoice_to_pay.clear();
+                                        // TODO
+
+                                    },
+                                    Err(e) => {
+                                        self.status_message = format!("Payment error: {}", e);
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                self.status_message = format!("Invalid invoice: {}", e);
+                            }
+                        }
+                    }
+                });
                 
                 // Action buttons
                 if ui.button("Create New Channel").clicked() {
@@ -655,3 +682,5 @@ pub fn run() {
         eprintln!("Error starting the application: {:?}", e);
     });
 }
+
+
