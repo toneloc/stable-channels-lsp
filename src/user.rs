@@ -175,9 +175,7 @@ impl UserApp {
         } else {
             println!("Failed to parse node ID: {}", target_node_id);
         }
-        
-        let show_onboarding = node.list_channels().is_empty();
-        
+                
         let mut stable_channel = StableChannel::default();
         stable_channel.expected_usd = USD::from_f64(EXPECTED_USD);
         let is_stable_channel_initialized = false;
@@ -303,8 +301,26 @@ impl UserApp {
     
     fn update_balances(&mut self) {
         let balances = self.node.list_balances();
+        
+        println!("Total Lightning Balance (sats): {}", balances.total_lightning_balance_sats);
+        
+        if self.btc_price == 0.0 {
+            match get_latest_price(&ureq::Agent::new()) {
+                Ok(latest_price) => {
+                    println!("Fetched latest price: ${:.2}", latest_price);
+                    self.btc_price = latest_price;
+                },
+                Err(e) => {
+                    println!("Failed to fetch price: {:?}", e);
+                    self.btc_price = 55000.0; // Use a reasonable default price
+                }
+            }
+        }
+    
         self.balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
         self.balance_usd = self.balance_btc * self.btc_price;
+    
+        println!("Calculated Balance - BTC: {:.8}, USD: {:.2}", self.balance_btc, self.balance_usd);
     }
 
     fn show_waiting_for_payment_screen(&mut self, ctx: &egui::Context) {
@@ -462,6 +478,7 @@ impl UserApp {
     }
 
     fn show_main_screen(&mut self, ctx: &egui::Context) {
+
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Stable Channels");
@@ -476,21 +493,21 @@ impl UserApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 let balances = self.node.list_balances();
-                let lightning_balance_btc = Bitcoin::from_sats(balances.total_lightning_balance_sats);
-                let lightning_balance_usd = USD::from_bitcoin(lightning_balance_btc, self.btc_price);
-      
+                let balance_btc = Bitcoin::from_sats(balances.total_lightning_balance_sats);
+                let balance_usd = USD::from_bitcoin(balance_btc, self.btc_price);
+                
                 ui.add_space(30.0);
-
+                
                 ui.group(|ui| {
                     ui.add_space(20.0);
                     ui.heading("Your Stable Balance");
                     ui.add(egui::Label::new(
-                        egui::RichText::new(lightning_balance_usd.to_string())
+                        egui::RichText::new(balance_usd.to_string())
                             .size(36.0)
                             .strong(),
                     ));
                     ui.label(format!("Agreed Peg USD: {}", self.stable_channel.expected_usd));
-                    ui.label(format!("Bitcoin: {}", lightning_balance_btc.to_string()));
+                    ui.label(format!("Bitcoin: {}", balance_btc.to_string()));
                     ui.add_space(20.0);
                 });
 
