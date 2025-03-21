@@ -1,4 +1,3 @@
-#[cfg(feature = "lsp")]
 use eframe::{egui, App, Frame};
 use ldk_node::{
     bitcoin::{Network, Address},
@@ -13,15 +12,10 @@ use std::time::{Duration, Instant};
 use crate::price_feeds::get_latest_price;
 
 // Configuration constants
-#[cfg(feature = "lsp")]
 const LSP_DATA_DIR: &str = "data/lsp";
-#[cfg(feature = "lsp")]
 const LSP_NODE_ALIAS: &str = "lsp";
-#[cfg(feature = "lsp")]
 const LSP_PORT: u16 = 9737;
-#[cfg(feature = "lsp")]
 const DEFAULT_NETWORK: &str = "signet";
-#[cfg(feature = "lsp")]
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 
 #[cfg(feature = "lsp")]
@@ -42,6 +36,7 @@ struct LspApp {
     onchain_balance_usd: f64,
     total_balance_btc: f64,
     total_balance_usd: f64,
+    channel_id_to_close: String,
 }
 
 #[cfg(feature = "lsp")]
@@ -139,10 +134,12 @@ impl LspApp {
             onchain_balance_usd: 0.0,
             total_balance_btc: 0.0,
             total_balance_usd: 0.0,
+            channel_id_to_close: String::new(),
         };
         
         // Update balances once initially
         app.update_balances();
+        app.update_channel_info();
         
         app
     }
@@ -162,12 +159,14 @@ impl LspApp {
         #[cfg(feature = "lsp")]
         {
             if let Ok(latest_price) = std::panic::catch_unwind(|| {
-                crate::price_feeds::get_latest_price(&ureq::Agent::new()).unwrap_or_else(|_| 0.0)
+                crate::price_feeds::get_latest_price(&ureq::Agent::new()).unwrap_or(self.btc_price)
             }) {
-                self.btc_price = latest_price;
-                self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
-                self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
-                self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+                if latest_price > 0.0 {
+                    self.btc_price = latest_price;
+                    self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
+                    self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
+                    self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+                }
             }
         }
     }
@@ -205,7 +204,7 @@ impl LspApp {
                     self.update_balances();
                 }
                 
-                Event::PaymentReceived { payment_hash, amount_msat, .. } => {
+                Event::PaymentReceived { amount_msat, .. } => {
                     self.status_message = format!("Received payment of {} msats", amount_msat);
                     self.update_balances();
                 }
@@ -241,6 +240,78 @@ impl LspApp {
         }
     }
     
+    fn close_specific_channel(&mut self) {
+        if self.channel_id_to_close.is_empty() {
+            self.status_message = "Please enter a channel ID to close".to_string();
+            return;
+        }
+    
+        // Try to parse the channel ID (could be hex or formatted)
+        let channel_id_str = self.channel_id_to_close.trim();
+        
+        // First check if this is a channel ID in hex format
+        if channel_id_str.len() == 64 && channel_id_str.chars().all(|c| c.is_ascii_hexdigit()) {
+            // It's a hex string, convert to bytes
+            match hex::decode(channel_id_str) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut found = false;
+                    for channel in self.node.list_channels().iter() {
+                        // Compare the bytes of the channel ID
+                        let channel_id_bytes = channel.channel_id.0.to_vec();
+                        if channel_id_bytes == bytes {
+                            found = true;
+                            let user_channel_id = channel.user_channel_id.clone();
+                            let counterparty_node_id = channel.counterparty_node_id;
+                            match self.node.close_channel(&user_channel_id, counterparty_node_id) {
+                                Ok(_) => {
+                                    self.status_message = format!("Closing channel with ID: {}", self.channel_id_to_close);
+                                    self.channel_id_to_close.clear(); // Clear the field after successful operation
+                                },
+                                Err(e) => {
+                                    self.status_message = format!("Error closing channel: {}", e);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    
+                    if !found {
+                        self.status_message = format!("No channel found with ID: {}", self.channel_id_to_close);
+                    }
+                },
+                _ => {
+                    self.status_message = "Invalid channel ID format".to_string();
+                }
+            }
+        } else {
+            // Try to find a channel with ID that contains the provided string
+            // This allows for partial matching with formatted channel IDs
+            let mut found = false;
+            for channel in self.node.list_channels().iter() {
+                let channel_id_string = channel.channel_id.to_string();
+                if channel_id_string.contains(channel_id_str) {
+                    found = true;
+                    let user_channel_id = channel.user_channel_id.clone();
+                    let counterparty_node_id = channel.counterparty_node_id;
+                    match self.node.close_channel(&user_channel_id, counterparty_node_id) {
+                        Ok(_) => {
+                            self.status_message = format!("Closing channel with ID: {}", channel_id_string);
+                            self.channel_id_to_close.clear(); // Clear the field after successful operation
+                        },
+                        Err(e) => {
+                            self.status_message = format!("Error closing channel: {}", e);
+                        }
+                    }
+                    break;
+                }
+            }
+            
+            if !found {
+                self.status_message = format!("No channel found matching: {}", self.channel_id_to_close);
+            }
+        }
+    }
+
     fn show_lsp_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             // Add a scrollable area that encompasses the entire central panel
@@ -424,6 +495,21 @@ impl LspApp {
                                 self.status_message = "Invalid amount".to_string();
                             }
                         }
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    // Close Specific Channel
+                    ui.group(|ui| {
+                        ui.heading("Close Specific Channel");
+                        ui.horizontal(|ui| {
+                            ui.label("Channel ID:");
+                            ui.text_edit_singleline(&mut self.channel_id_to_close);
+                            
+                            if ui.button("Close Channel").clicked() {
+                                self.close_specific_channel();
+                            }
+                        });
                     });
                     
                     ui.add_space(10.0);
