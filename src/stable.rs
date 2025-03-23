@@ -4,21 +4,6 @@ use ldk_node::{
 };
 use ureq::Agent;
 
-/// Represents the action to take after a stability check
-#[derive(Debug, Clone)]
-pub enum StabilityAction {
-    /// No action needed, channel is stable enough
-    DoNothing,
-    /// Wait for payment from counterparty
-    Wait,
-    /// Make a payment to maintain stability
-    Pay(u64), // amount in msats
-    /// High risk situation detected
-    HighRisk(u32), // risk level
-    /// Channel not properly initialized or not found
-    NotInitialized,
-}
-
 /// Get the latest BTC/USD price from available price feeds
 pub fn get_latest_price(agent: &Agent) -> f64 {
     match crate::price_feeds::get_latest_price(agent) {
@@ -33,85 +18,45 @@ pub fn channel_exists(node: &Node, channel_id: &ChannelId) -> bool {
     channels.iter().any(|c| c.channel_id == *channel_id)
 }
 
-/// Update stable channel balances based on current channel state
 pub fn update_balances(node: &Node, mut sc: StableChannel) -> (bool, StableChannel) {
-    // Get current price if we don't have it
     if sc.latest_price == 0.0 {
         let agent = Agent::new();
         sc.latest_price = get_latest_price(&agent);
     }
     
-    // First check if we're using the default channel ID (all zeros)
-    let is_default = sc.channel_id == ChannelId::from_bytes([0; 32]);
-    let mut matching_channel_found = false;
+    let channels = node.list_channels();
+    let matching_channel = if sc.channel_id == ChannelId::from_bytes([0; 32]) {
+        channels.first()
+    } else {
+        channels.iter().find(|c| c.channel_id == sc.channel_id)
+    };
     
-    // If it's a default channel ID, try to find any available channel
-    if is_default {
-        if let Some(channel) = node.list_channels().first() {
+    if let Some(channel) = matching_channel {
+        if sc.channel_id == ChannelId::from_bytes([0; 32]) {
             sc.channel_id = channel.channel_id;
             println!("Set active channel ID to: {}", sc.channel_id);
-            matching_channel_found = true;
-            
-            // Update the channel balances
-            let (our_balance, their_balance) = {
-                let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
-                let our_balance_sats =
-                    (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
-                let their_balance_sats = channel.channel_value_sats - our_balance_sats;
-                (our_balance_sats, their_balance_sats)
-            };
-            
-            // Update balances based on whether we're the stable receiver or provider
-            if sc.is_stable_receiver {
-                sc.stable_receiver_btc = Bitcoin::from_sats(our_balance);
-                sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
-                sc.stable_provider_btc = Bitcoin::from_sats(their_balance);
-                sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
-            } else {
-                sc.stable_provider_btc = Bitcoin::from_sats(our_balance);
-                sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
-                sc.stable_receiver_btc = Bitcoin::from_sats(their_balance);
-                sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
-            }
         }
-    } else {
-        // Otherwise, look for a channel matching our stored ID
-        for channel in node.list_channels() {
-            if channel.channel_id == sc.channel_id {
-                matching_channel_found = true;
-                
-                // Update the channel balances
-                let (our_balance, their_balance) = {
-                    let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
-                    let our_balance_sats =
-                        (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
-                    let their_balance_sats = channel.channel_value_sats - our_balance_sats;
-                    (our_balance_sats, their_balance_sats)
-                };
-                
-                // Update balances based on whether we're the stable receiver or provider
-                if sc.is_stable_receiver {
-                    sc.stable_receiver_btc = Bitcoin::from_sats(our_balance);
-                    sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
-                    sc.stable_provider_btc = Bitcoin::from_sats(their_balance);
-                    sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
-                } else {
-                    sc.stable_provider_btc = Bitcoin::from_sats(our_balance);
-                    sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
-                    sc.stable_receiver_btc = Bitcoin::from_sats(their_balance);
-                    sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
-                }
-                
-                break;
-            }
+        
+        let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
+        let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
+        let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+        
+        if sc.is_stable_receiver {
+            sc.stable_receiver_btc = Bitcoin::from_sats(our_balance_sats);
+            sc.stable_provider_btc = Bitcoin::from_sats(their_balance_sats);
+        } else {
+            sc.stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
+            sc.stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
         }
+        
+        sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
+        sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
+        
+        return (true, sc);
     }
     
-    if !matching_channel_found {
-        println!("No matching channel found for ID: {}", sc.channel_id);
-    }
-    
-    (matching_channel_found, sc)
+    println!("No matching channel found for ID: {}", sc.channel_id);
+    (false, sc)
 }
 
 /// Initialize a stable channel with the given parameters
@@ -162,126 +107,76 @@ pub fn initialize_stable_channel(
     Ok(updated_sc)
 }
 
-/// Check if the stable channel is in balance and determine what action to take
+/// Check stability, do appropriate payment or accounting
 pub fn check_stability(node: &Node, sc: &mut StableChannel) {
+    println!("\n=== CHECKING CHANNEL STABILITY ===");
+    
     let (success, updated_sc) = update_balances(node, sc.clone());
-    
-    // If update was successful, copy the updated values back to our mutable reference
-    if success {
+    if success { 
         *sc = updated_sc;
-    }
-
-    // Calculate stability
-    let dollars_from_par: USD = sc.stable_receiver_usd - sc.expected_usd;
-    let percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
-
-    println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
-    println!("{:<25} {:>15}", "User USD:", sc.stable_receiver_usd);
-    println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
-
-    println!("{:<25} {:>15}", "User BTC:", sc.stable_receiver_btc);
-    println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
-
-    enum Action {
-        Wait,
-        Pay,
-        DoNothing,
-        HighRisk,
-    }
-
-    let action = if percent_from_par < 0.1 {
-        Action::DoNothing
+        println!("✓ Channel balances updated successfully");
     } else {
-        let is_receiver_below_expected: bool = sc.stable_receiver_usd < sc.expected_usd;
-
-        match (sc.is_stable_receiver, is_receiver_below_expected, sc.risk_level > 100) {
-            (_, _, true) => Action::HighRisk, // High risk scenario
-            (true, true, false) => Action::Wait,   // We are User and below peg, wait for payment
-            (true, false, false) => Action::Pay,   // We are User and above peg, need to pay
-            (false, true, false) => Action::Pay,   // We are LSP and below peg, need to pay
-            (false, false, false) => Action::Wait, // We are LSP and above peg, wait for payment
-        }
-    };
-
-    match action {
-        Action::DoNothing => {
-            println!("\nDifference from par less than 0.1%. Doing nothing.");
-            // We could set a flag here to indicate stability
-        }
-        Action::Wait => {
-            println!("\nWaiting for payment...");
-            // Update some state to indicate we're waiting
-        }
-        Action::Pay => {
-            println!("\nPaying the difference...\n");
-            println!("Paying msats to counterparty: {}", sc.counterparty);
-
-
-            let amt = USD::to_msats(dollars_from_par, sc.latest_price);
-
-            // Perform payment logic
-            let result = node
-                .spontaneous_payment()
-                .send(amt, sc.counterparty, None);
-                
-            match result {
-                Ok(payment_id) => {
-                    println!("Payment sent successfully with payment ID: {}", payment_id);
-                    sc.payment_made = true;  // Set flag to indicate payment was made
-                },
-                Err(e) => println!("Failed to send payment: {}", e),
-            }
-        }
-        Action::HighRisk => {
-            println!("Risk level high. Current risk level: {}", sc.risk_level);
-            // Update some state to indicate high risk
-        }
+        println!("⚠ Failed to update channel balances");
     }
+    
+    // Calculate stability
+    let dollars_from_par = sc.stable_receiver_usd - sc.expected_usd;
+    let percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
+    
+    println!("Channel status:");
+    println!("  Expected USD:      {}", sc.expected_usd);
+    println!("  Current user USD:  {}", sc.stable_receiver_usd);
+    println!("  Difference:        ${:.2}", dollars_from_par.0);
+    println!("  Percent from par:  {:.2}%", percent_from_par);
+    println!("  User BTC:          {}", sc.stable_receiver_btc);
+    println!("  LSP USD:           {}", sc.stable_provider_usd);
+    println!("  BTC price:         ${:.2}", sc.latest_price);
+    
+    // Determine action based on criteria
+    let is_receiver_below_expected = sc.stable_receiver_usd < sc.expected_usd;
+    
+    if percent_from_par < 0.1 {
+        println!("\n✓ STABLE: Difference from par less than 0.1%. No action needed.");
+        return;
+    } else if sc.risk_level > 100 {
+        println!("\n⚠ HIGH RISK: Risk level ({}) exceeds threshold. Action suspended.", sc.risk_level);
+        return;
+    } else if (sc.is_stable_receiver && is_receiver_below_expected) || 
+              (!sc.is_stable_receiver && !is_receiver_below_expected) {
+        println!("\n⏱ WAITING: Balance conditions indicate we should wait for payment from counterparty.");
+        if sc.is_stable_receiver {
+            println!("  We are the stable receiver and our balance is below expected.");
+        } else {
+            println!("  We are the stable provider and receiver balance is above expected.");
+        }
+        return;
+    }
+    
+    // Only payment action remains
+    println!("\n💸 PAYING: Sending payment to maintain stability.");
+    if sc.is_stable_receiver {
+        println!("  We are the stable receiver and our balance is above expected.");
+    } else {
+        println!("  We are the stable provider and receiver balance is below expected.");
+    }
+    
+    let amt = USD::to_msats(dollars_from_par, sc.latest_price);
+    println!("  Amount to pay:     {} msats (${:.2})", amt, dollars_from_par.0.abs());
+    println!("  Counterparty:      {}", sc.counterparty);
+    
+    match node.spontaneous_payment().send(amt, sc.counterparty, None) {
+        Ok(payment_id) => {
+            println!("✓ Payment sent successfully!");
+            println!("  Payment ID: {}", payment_id);
+            sc.payment_made = true;
+        },
+        Err(e) => println!("✗ Failed to send payment: {}", e),
+    }
+    
+    println!("=== STABILITY CHECK COMPLETE ===");
 }
 
-/// Execute a payment to maintain stability
-pub fn execute_payment(node: &Node, amount_msats: u64, sc: &StableChannel) -> Result<String, Box<dyn std::error::Error>> {
-    // Avoid sending zero-amount payments which could trigger assertion failures
-    if amount_msats == 0 {
-        return Err("Cannot send a payment with zero amount".into());
-    }
-    
-    // Get channel details
-    let channels = node.list_channels();
-    let channel = channels.iter().find(|c| c.channel_id == sc.channel_id);
-    
-    // Verify channel exists
-    if channel.is_none() {
-        return Err("Channel not found".into());
-    }
-    
-    let channel = channel.unwrap();
-    
-    // Check if channel is ready
-    if !channel.is_channel_ready {
-        return Err("Channel is not ready for payments".into());
-    }
-    
-    // Check if we have sufficient outbound capacity
-    if channel.outbound_capacity_msat < amount_msats {
-        return Err(format!("Insufficient outbound capacity: have {}msat, need {}msat", 
-                          channel.outbound_capacity_msat, amount_msats).into());
-    }
-    
-    // Verify the counterparty exists and matches our stable channel
-    if channel.counterparty_node_id != sc.counterparty {
-        return Err("Counterparty mismatch".into());
-    }
-    
-    // Perform the payment
-    let result = node
-        .spontaneous_payment()
-        .send(amount_msats, sc.counterparty, None)?;
-        
-    Ok(result.to_string())
-}
-
-/// Function to parse a ChannelId from a string (helper function)
+/// Helper function
 fn from_str_channel_id(s: &str) -> Result<ChannelId, Box<dyn std::error::Error>> {
     // Simplified parsing - may need to be expanded based on the actual string format
     let clean_str = s.trim();
