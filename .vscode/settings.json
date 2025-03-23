@@ -1,0 +1,4 @@
+{
+    "rust-analyzer.cargo.features": ["exchange", "user", "lsp"],
+    "rust-analyzer.checkOnSave.allFeatures": true
+}

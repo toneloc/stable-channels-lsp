@@ -1,9 +1,7 @@
 #[cfg(feature = "user")]
 use eframe::{egui, App, Frame};
 use ldk_node::{
-    bitcoin::{secp256k1::PublicKey, Network},
-    lightning::ln::msgs::SocketAddress, lightning_invoice::Bolt11Invoice,
-    Builder, Node, Event
+    bitcoin::{secp256k1::PublicKey, Network}, lightning::ln::{msgs::SocketAddress, types::ChannelId}, lightning_invoice::Bolt11Invoice, Builder, Event, Node
 };
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -28,22 +26,20 @@ const DEFAULT_NETWORK: &str = "signet";
 #[cfg(feature = "user")]
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 #[cfg(feature = "user")]
-const DEFAULT_LSP_PUBKEY: &str = "02fe1194d6359a045419c88304bc9bd77de4b4b19f22f5160f0ca7eb722bd86d27";
+const DEFAULT_LSP_PUBKEY: &str = "03cd003757e0b02089abefeaa68b48965d6eac77c456a4d915a60016e76994a881";
 #[cfg(feature = "user")]
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 #[cfg(feature = "user")]
 const DEFAULT_LSP_AUTH: &str = "00000000000000000000000000000000";
 #[cfg(feature = "user")]
-const EXPECTED_USD: f64 = 1.0;
+const EXPECTED_USD: f64 = 15.0;
+const DEFAULT_GATEWAY_PUBKEY: &str = "033232aa4a2a78ca7e7e61d8378fa5398e7112e86f8a62684ab6513d1f3f4598bc";
 
-/// The main app state for the user interface
+/// This is the main app state for the user interface
 #[cfg(feature = "user")]
 struct UserApp {
     node: Node,
-    // Removed the direct BTC/USD fields for the UI
-    // Instead, we rely on stable_channel for the user’s “stable” balances
     btc_price: f64,
-
     show_onboarding: bool,
     last_update: Instant,
     status_message: String,
@@ -60,9 +56,11 @@ struct UserApp {
 #[cfg(feature = "user")]
 impl UserApp {
     fn new() -> Self {
-        println!("Initializing user node...");
+        // Hello, let's start up
+        println!("Initializing user node ... ");
         
-        // Ensure data directory exists
+        // We should ensure the data directory exists. 
+        // This is where we store all the data!
         let data_dir = PathBuf::from(USER_DATA_DIR);
         if !data_dir.exists() {
             std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| {
@@ -70,9 +68,11 @@ impl UserApp {
             });
         }
 
+        // This is for LDK
         let mut builder = Builder::new();
         
         // Parse LSP pubkey if available
+        // Should extract this
         let lsp_pubkey = if !DEFAULT_LSP_PUBKEY.is_empty() {
             match hex::decode(DEFAULT_LSP_PUBKEY) {
                 Ok(bytes) => {
@@ -100,13 +100,11 @@ impl UserApp {
         if let Some(lsp_pubkey) = lsp_pubkey {
             match DEFAULT_LSP_ADDRESS.parse::<std::net::SocketAddr>() {
                 Ok(socket_addr) => {
-                    // Convert to SocketAddress for LDK
                     let ldk_socket_addr = SocketAddress::from(socket_addr);
                     
                     println!("Setting LSP with address: {} and pubkey: {}", 
                              DEFAULT_LSP_ADDRESS, lsp_pubkey);
                     
-                    // The correct parameter order is (pubkey, address, auth_token)
                     builder.set_liquidity_source_lsps2(
                         lsp_pubkey,
                         ldk_socket_addr, 
@@ -119,7 +117,6 @@ impl UserApp {
             }
         }
         
-        // Configure the network
         let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
             "signet" => Network::Signet,
             "testnet" => Network::Testnet,
@@ -133,21 +130,17 @@ impl UserApp {
         println!("Setting network to: {:?}", network);
         builder.set_network(network);
         
-        // Set up Esplora chain source
         println!("Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
         builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
         
-        // Set up data directory
         println!("Setting storage directory: {}", USER_DATA_DIR);
         builder.set_storage_dir_path(USER_DATA_DIR.to_string());
         
-        // Set up listening address for the user node
         let listen_addr = format!("127.0.0.1:{}", USER_PORT).parse().unwrap();
         println!("Setting listening address: {}", listen_addr);
         builder.set_listening_addresses(vec![listen_addr]).unwrap();
         
-        // Set node alias
-        builder.set_node_alias(USER_NODE_ALIAS.to_string());
+        let _ = builder.set_node_alias(USER_NODE_ALIAS.to_string());
         
         // Build the node
         let node = match builder.build() {
@@ -167,22 +160,88 @@ impl UserApp {
         
         println!("User node started with ID: {}", node.node_id());
 
-        // connect to exchange node
-        let target_node_id = "037639cf15e5a71adf33c4e92522aa17de79773d18d870ba17f100a3728dbab0e6";
-        if let Ok(pubkey) = PublicKey::from_str(target_node_id) {
+        // This connects to the "gateway" node
+        // This is a node that connects to our LSP
+        if let Ok(pubkey) = PublicKey::from_str(DEFAULT_GATEWAY_PUBKEY) {
             let socket_addr = SocketAddress::from_str("127.0.0.1:9735").unwrap(); 
             match node.connect(pubkey, socket_addr, true) {
-                Ok(_) => println!("Successfully connected to node: {}", target_node_id),
+                Ok(_) => println!("Successfully connected to node: {}", DEFAULT_GATEWAY_PUBKEY),
                 Err(e) => println!("Failed to connect to node: {}", e),
             }
         } else {
-            println!("Failed to parse node ID: {}", target_node_id);
+            println!("Failed to parse node ID: {}", DEFAULT_GATEWAY_PUBKEY);
         }
                 
-        let mut stable_channel = StableChannel::default();
-        stable_channel.expected_usd = USD::from_f64(EXPECTED_USD);
+        // Now we have inited the LDK node
+        // Let's init the Stable Channel
+        let expected_usd = USD::from_f64(EXPECTED_USD);
+        let agent = ureq::Agent::new();
+        let latest_price = get_latest_price(&agent);
+        let price = latest_price.expect("latest_price fetch failed");
 
-        let is_stable_channel_initialized = false;
+        // Use the first available channel, if any
+        let channel = node.list_channels().into_iter().next();
+
+        let mut stable_channel = if let Some(channel) = channel {
+            let channel_id = channel.channel_id;
+            let counterparty = channel.counterparty_node_id;
+            let is_stable_receiver = true;
+
+            let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
+            let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
+            let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+
+            let (stable_receiver_btc, stable_provider_btc) = if is_stable_receiver {
+                (Bitcoin::from_sats(our_balance_sats), Bitcoin::from_sats(their_balance_sats))
+            } else {
+                (Bitcoin::from_sats(their_balance_sats), Bitcoin::from_sats(our_balance_sats))
+            };
+
+            let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, price);
+            let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, price);
+
+            let stable_provider_btc = Bitcoin::from_usd(stable_provider_usd, price);
+            let expected_btc = Bitcoin::from_usd(expected_usd, price);
+
+            StableChannel {
+                channel_id,
+                counterparty: lsp_pubkey.unwrap(),
+                is_stable_receiver,
+                expected_usd,
+                expected_btc,
+                stable_receiver_btc,
+                stable_receiver_usd,
+                stable_provider_btc,
+                stable_provider_usd,
+                latest_price: price,
+                risk_level: 0,
+                payment_made: false,
+                timestamp: 0,
+                formatted_datetime: "2021-06-01 12:00:00".to_string(),
+                sc_dir: "/".to_string(),
+                prices: "".to_string(),
+            }
+        } else {
+            eprintln!("No channels found. Creating empty stable channel.");
+            StableChannel {
+                channel_id: ChannelId::from_bytes([0u8; 32]),
+                counterparty: lsp_pubkey.unwrap(),
+                is_stable_receiver: true,
+                expected_usd,
+                expected_btc: Bitcoin::from_btc(0.0),
+                stable_receiver_btc: Bitcoin::from_btc(0.0),
+                stable_receiver_usd: USD::from_f64(0.0),
+                stable_provider_btc: Bitcoin::from_btc(0.0),
+                stable_provider_usd: USD::from_f64(0.0),
+                latest_price: price,
+                risk_level: 0,
+                payment_made: false,
+                timestamp: 0,
+                formatted_datetime: "2021-06-01 12:00:00".to_string(),
+                sc_dir: "/".to_string(),
+                prices: "".to_string(),
+            }
+        };
 
         let channels = node.list_channels();
         let show_onboarding = channels.is_empty();
@@ -199,7 +258,7 @@ impl UserApp {
             qr_texture: None,
             waiting_for_payment: false,
             stable_channel,
-            is_stable_channel_initialized,
+            is_stable_channel_initialized: true,
             last_stability_check: Instant::now(),
             invoice_amount: String::new(),
             invoice_to_pay: String::new(),
@@ -214,7 +273,7 @@ impl UserApp {
         
 
         let result = self.node.bolt11_payment().receive_via_jit_channel(
-            5_000_000, 
+            20_000_000, 
             &description,
             3600, // 1 hour expiry
             Some(1_000_000), // minimum channel size of 10k sats
@@ -633,7 +692,7 @@ impl App for UserApp {
         // because we now rely on stable channel data for the user’s UI balance.
 
         // Update stable channel & price every 30 seconds
-        if self.last_stability_check.elapsed() > Duration::from_secs(30) {
+        if self.last_stability_check.elapsed() > Duration::from_secs(10) {
             if let Ok(latest_price) = get_latest_price(&ureq::Agent::new()) {
                 self.btc_price = latest_price;
                 self.stable_channel.latest_price = latest_price;

@@ -58,14 +58,16 @@ impl LspApp {
         let service_config = LSPS2ServiceConfig {
             require_token: None,
             advertise_service: true,
-            channel_opening_fee_ppm: 10_000,
-            channel_over_provisioning_ppm: 100_000,
+            channel_opening_fee_ppm: 1_000,
+            channel_over_provisioning_ppm: 1_000_000,
             min_channel_opening_fee_msat: 0,
             min_channel_lifetime: 100,
             max_client_to_self_delay: 1024,
             min_payment_size_msat: 0,
-            max_payment_size_msat: 10_000_000_000,
+            max_payment_size_msat: 100_000_000_000,
         };
+
+
         
         builder.set_liquidity_provider_lsps2(service_config);
         
@@ -188,7 +190,7 @@ impl App for LspApp {
         // Show the LSP interface
         self.show_lsp_screen(ctx);
         
-        // Request a repaint frequently to keep the UI responsive
+        // Request a repaint frequently tfo keep the UI responsive
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 }

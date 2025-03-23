@@ -23,7 +23,7 @@ pub enum StabilityAction {
 pub fn get_latest_price(agent: &Agent) -> f64 {
     match crate::price_feeds::get_latest_price(agent) {
         Ok(price) => price,
-        Err(_) => 60000.0 // Default fallback price
+        Err(_) => 84000.0 // TODO
     }
 }
 
@@ -214,6 +214,8 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel) {
         }
         Action::Pay => {
             println!("\nPaying the difference...\n");
+            println!("Paying msats to counterparty: {}", sc.counterparty);
+
 
             let amt = USD::to_msats(dollars_from_par, sc.latest_price);
 

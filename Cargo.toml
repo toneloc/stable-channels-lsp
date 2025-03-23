@@ -9,7 +9,7 @@ user = []
 lsp = []
 
 [dependencies]
-ldk-node = { git = "https://github.com/lightningdevkit/ldk-node.git", rev = "22cb1df03ff071c5a7f6b01ce4654874e2996c2a" }
+ldk-node = { git = "https://github.com/lightningdevkit/ldk-node.git", rev = "f0338d19256615088fabab2b6927d478ae3ec1a1" }
 lightning = { version = "0.0.125", features = ["std"] }
 ureq = { version = "2.10.1", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }

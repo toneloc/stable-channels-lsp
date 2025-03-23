@@ -38,7 +38,6 @@ struct ExchangeApp {
     onchain_balance_usd: f64,
     total_balance_btc: f64,
     total_balance_usd: f64,
-    // Channel opening fields
     node_id_input: String,
     net_address_input: String,
     channel_amount_input: String,
@@ -109,7 +108,7 @@ impl ExchangeApp {
         
         let mut app = Self {
             node,
-            invoice_amount: "10000".to_string(), // Default 10k sats
+            invoice_amount: "1000".to_string(), // Default 10k sats
             invoice_result: String::new(),
             invoice_to_pay: String::new(),
             on_chain_address: String::new(),
@@ -119,13 +118,13 @@ impl ExchangeApp {
             channel_info: String::new(),
             lightning_balance_btc: 0.0,
             onchain_balance_btc: 0.0,
-            btc_price: 55000.0, // Default BTC price
+            btc_price: 0.0, // Default BTC price
             lightning_balance_usd: 0.0,
             onchain_balance_usd: 0.0,
             total_balance_btc: 0.0,
             total_balance_usd: 0.0,
             node_id_input: String::new(),
-            net_address_input: "127.0.0.1:9736".to_string(), // Default to user node port
+            net_address_input: "127.0.0.1:9737".to_string(), // Default to user node port
             channel_amount_input: "100000".to_string(), // Default 100k sats
         };
         
@@ -164,11 +163,13 @@ impl ExchangeApp {
             let mut info = String::new();
             for (i, channel) in channels.iter().enumerate() {
                 info.push_str(&format!(
-                    "Channel {}: ID: {}, Value: {} sats, Ready: {}\n", 
+                    "Channel {}: ID: {}\n  Value: {} sats\n  Ready: {}\n  Outbound Capacity: {} msats\n  Next Outbound HTLC Limit: {} msats\n\n", 
                     i + 1,
                     channel.channel_id, 
                     channel.channel_value_sats,
-                    channel.is_channel_ready
+                    channel.is_channel_ready,
+                    channel.outbound_capacity_msat,
+                    channel.next_outbound_htlc_limit_msat
                 ));
             }
             self.channel_info = info;
@@ -487,7 +488,7 @@ impl ExchangeApp {
                 
                 // List Channels
                 ui.group(|ui| {
-                    ui.label("Channels");
+                    ui.heading("Channels");
                     if ui.button("Refresh Channel List").clicked() {
                         self.update_channel_info();
                     }
