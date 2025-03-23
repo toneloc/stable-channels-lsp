@@ -1,7 +1,8 @@
 use eframe::{egui, App, Frame};
 use ldk_node::{
-    bitcoin::{Network, Address},
+    bitcoin::{Network, Address, secp256k1::PublicKey},
     lightning_invoice::Bolt11Invoice,
+    lightning::ln::{msgs::SocketAddress, types::ChannelId},
     Builder, Node, Event, liquidity::LSPS2ServiceConfig,
 };
 use std::path::PathBuf;
@@ -10,6 +11,8 @@ use hex;
 use std::time::{Duration, Instant};
 
 use crate::price_feeds::get_latest_price;
+use crate::types::*;
+use crate::stable;
 
 // Configuration constants
 const LSP_DATA_DIR: &str = "data/lsp";
@@ -17,6 +20,7 @@ const LSP_NODE_ALIAS: &str = "lsp";
 const LSP_PORT: u16 = 9737;
 const DEFAULT_NETWORK: &str = "signet";
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
+const EXPECTED_USD: f64 = 15.0;  // Default expected USD value for stable channels
 
 #[cfg(feature = "lsp")]
 struct LspApp {
@@ -37,6 +41,12 @@ struct LspApp {
     total_balance_btc: f64,
     total_balance_usd: f64,
     channel_id_to_close: String,
+    
+    // Stable channel related fields
+    stable_channels: Vec<StableChannel>,
+    selected_channel_id: String,
+    stable_channel_amount: String,
+    last_stability_check: Instant,
 }
 
 #[cfg(feature = "lsp")]
@@ -67,8 +77,6 @@ impl LspApp {
             max_payment_size_msat: 100_000_000_000,
         };
 
-
-        
         builder.set_liquidity_provider_lsps2(service_config);
         
         // Configure the network
@@ -119,6 +127,10 @@ impl LspApp {
         
         println!("LSP node started with ID: {}", node.node_id());
         
+        // Get initial BTC price
+        let agent = ureq::Agent::new();
+        let btc_price = get_latest_price(&agent).unwrap_or(55000.0);
+        
         let mut app = Self {
             node,
             invoice_amount: "10000".to_string(), // Default 10k sats
@@ -131,17 +143,26 @@ impl LspApp {
             channel_info: String::new(),
             lightning_balance_btc: 0.0,
             onchain_balance_btc: 0.0,
-            btc_price: 55000.0, // Default BTC price
+            btc_price,
             lightning_balance_usd: 0.0,
             onchain_balance_usd: 0.0,
             total_balance_btc: 0.0,
             total_balance_usd: 0.0,
             channel_id_to_close: String::new(),
+            
+            // Initialize stable channel fields
+            stable_channels: Vec::new(),
+            selected_channel_id: String::new(),
+            stable_channel_amount: EXPECTED_USD.to_string(),  // Default to $15
+            last_stability_check: Instant::now(),
         };
         
         // Update balances once initially
         app.update_balances();
         app.update_channel_info();
+        
+        // Initialize stable channels from existing channels
+        // app.initialize_stable_channels();
         
         app
     }
@@ -168,8 +189,145 @@ impl LspApp {
                     self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
                     self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
                     self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+                    
+                    // Update price in all stable channels
+                    for sc in &mut self.stable_channels {
+                        sc.latest_price = latest_price;
+                    }
                 }
             }
+        }
+    }
+    
+    fn initialize_stable_channels(&mut self) {
+        self.stable_channels.clear();
+        
+        for channel in self.node.list_channels() {
+            let is_stable_receiver = false;
+            
+            let expected_usd = USD::from_f64(EXPECTED_USD);
+            let expected_btc = Bitcoin::from_usd(expected_usd, self.btc_price);
+            
+            let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
+            let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
+            let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+            
+            let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
+            let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
+            
+            let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
+            let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
+            
+            let stable_channel = StableChannel {
+                channel_id: channel.channel_id,
+                counterparty: channel.counterparty_node_id,
+                is_stable_receiver,
+                expected_usd,
+                expected_btc,
+                stable_receiver_btc,
+                stable_receiver_usd,
+                stable_provider_btc,
+                stable_provider_usd,
+                latest_price: self.btc_price,
+                risk_level: 0,
+                payment_made: false,
+                timestamp: 0,
+                formatted_datetime: "".to_string(),
+                sc_dir: LSP_DATA_DIR.to_string(),
+                prices: "".to_string(),
+            };
+            
+            self.stable_channels.push(stable_channel);
+        }
+    }
+    
+    fn designate_stable_channel(&mut self) {
+        if self.selected_channel_id.is_empty() {
+            self.status_message = "Please select a channel ID".to_string();
+            return;
+        }
+        
+        let amount = match self.stable_channel_amount.parse::<f64>() {
+            Ok(val) => val,
+            Err(_) => {
+                self.status_message = "Invalid amount format".to_string();
+                return;
+            }
+        };
+        
+        let channel_id_str = self.selected_channel_id.trim();
+        
+        for channel in self.node.list_channels() {
+            let channel_id_string = channel.channel_id.to_string();
+            
+            if channel_id_string.contains(channel_id_str) {
+                let expected_usd = USD::from_f64(amount);
+                let expected_btc = Bitcoin::from_usd(expected_usd, self.btc_price);
+                
+                let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
+                let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
+                let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+                
+                let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
+                let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
+                
+                let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
+                let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
+                
+                let stable_channel = StableChannel {
+                    channel_id: channel.channel_id,
+                    counterparty: channel.counterparty_node_id,
+                    is_stable_receiver: false, 
+                    expected_usd,
+                    expected_btc,
+                    stable_receiver_btc,
+                    stable_receiver_usd,
+                    stable_provider_btc,
+                    stable_provider_usd,
+                    latest_price: self.btc_price,
+                    risk_level: 0,
+                    payment_made: false,
+                    timestamp: 0,
+                    formatted_datetime: "".to_string(),
+                    sc_dir: LSP_DATA_DIR.to_string(),
+                    prices: "".to_string(),
+                };
+                
+                let mut found = false;
+                for sc in &mut self.stable_channels {
+                    if sc.channel_id == channel.channel_id {
+                        *sc = stable_channel.clone();
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if !found {
+                    self.stable_channels.push(stable_channel);
+                }
+                
+                self.status_message = format!(
+                    "Channel {} designated as stable with target amount of ${}",
+                    channel_id_string, amount
+                );
+                
+                self.selected_channel_id.clear();
+                self.stable_channel_amount = EXPECTED_USD.to_string();
+                
+                return;
+            }
+        }
+        
+        self.status_message = format!("No channel found matching: {}", self.selected_channel_id);
+    }
+    
+    fn check_and_update_stable_channels(&mut self) {
+        for sc in &mut self.stable_channels {
+            if !stable::channel_exists(&self.node, &sc.channel_id) {
+                continue;
+            }
+            
+            stable::check_stability(&self.node, sc);
         }
     }
 }
@@ -177,20 +335,21 @@ impl LspApp {
 #[cfg(feature = "lsp")]
 impl App for LspApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        // Poll for LDK node events
         self.poll_events();
         
-        // Update balances and other info periodically
         if self.last_update.elapsed() > Duration::from_secs(30) {
             self.update_balances();
             self.update_channel_info();
             self.last_update = Instant::now();
         }
         
-        // Show the LSP interface
+        if self.last_stability_check.elapsed() > Duration::from_secs(10) {
+            self.check_and_update_stable_channels();
+            self.last_stability_check = Instant::now();
+        }
+        
         self.show_lsp_screen(ctx);
         
-        // Request a repaint frequently tfo keep the UI responsive
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 }
@@ -204,17 +363,24 @@ impl LspApp {
                     self.status_message = format!("Channel {} is now ready", channel_id);
                     self.update_channel_info();
                     self.update_balances();
+                    
+                    // self.initialize_stable_channels();
                 }
                 
                 Event::PaymentReceived { amount_msat, .. } => {
                     self.status_message = format!("Received payment of {} msats", amount_msat);
+                    self.update_channel_info();
                     self.update_balances();
+                    // self.check_and_update_stable_channels();
                 }
                 
                 Event::ChannelClosed { channel_id, .. } => {
                     self.status_message = format!("Channel {} has been closed", channel_id);
                     self.update_channel_info();
                     self.update_balances();
+                    
+                    // Remove closed channels from stable channels
+                    self.stable_channels.retain(|sc| sc.channel_id != channel_id);
                 }
                 
                 _ => {} // Ignore other events for now
@@ -230,12 +396,16 @@ impl LspApp {
         } else {
             let mut info = String::new();
             for (i, channel) in channels.iter().enumerate() {
+                // Check if this channel is a stable channel
+                let is_stable = self.stable_channels.iter().any(|sc| sc.channel_id == channel.channel_id);
+                
                 info.push_str(&format!(
-                    "Channel {}: ID: {}, Value: {} sats, Ready: {}\n", 
+                    "Channel {}: ID: {}, Value: {} sats, Ready: {}{}\n", 
                     i + 1,
                     channel.channel_id, 
                     channel.channel_value_sats,
-                    channel.is_channel_ready
+                    channel.is_channel_ready,
+                    if is_stable { " [STABLE]" } else { "" }
                 ));
             }
             self.channel_info = info;
@@ -268,6 +438,9 @@ impl LspApp {
                                 Ok(_) => {
                                     self.status_message = format!("Closing channel with ID: {}", self.channel_id_to_close);
                                     self.channel_id_to_close.clear(); // Clear the field after successful operation
+                                    
+                                    // Remove from stable channels if it was a stable channel
+                                    self.stable_channels.retain(|sc| sc.channel_id != channel.channel_id);
                                 },
                                 Err(e) => {
                                     self.status_message = format!("Error closing channel: {}", e);
@@ -299,6 +472,9 @@ impl LspApp {
                         Ok(_) => {
                             self.status_message = format!("Closing channel with ID: {}", channel_id_string);
                             self.channel_id_to_close.clear(); // Clear the field after successful operation
+                            
+                            // Remove from stable channels if it was a stable channel
+                            self.stable_channels.retain(|sc| sc.channel_id != channel.channel_id);
                         },
                         Err(e) => {
                             self.status_message = format!("Error closing channel: {}", e);
@@ -360,6 +536,61 @@ impl LspApp {
                         ui.label(format!("Price: ${:.2} | Updated: {} seconds ago", 
                                          self.btc_price,
                                          self.last_update.elapsed().as_secs()));
+                    });
+                    
+                    // STABLE CHANNELS SECTION (New)
+                    ui.add_space(20.0);
+                    ui.group(|ui| {
+                        ui.heading("Stable Channels");
+                        
+                        // Display existing stable channels
+                        if self.stable_channels.is_empty() {
+                            ui.label("No stable channels configured");
+                        } else {
+                            for (i, sc) in self.stable_channels.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{}. Channel: {}", i+1, sc.channel_id));
+                                    ui.label(format!("Target: ${:.2}", sc.expected_usd.0));
+                                });
+                                
+                                // Show balances
+                                ui.horizontal(|ui| {
+                                    ui.label("    User balance:");
+                                    ui.label(format!("{:.8} BTC (${:.2})", sc.stable_receiver_btc.to_btc(), sc.stable_receiver_usd.0));
+                                });
+                                
+                                ui.horizontal(|ui| {
+                                    ui.label("    LSP balance:");
+                                    ui.label(format!("{:.8} BTC (${:.2})", sc.stable_provider_btc.to_btc(), sc.stable_provider_usd.0));
+                                });
+                                
+                                ui.add_space(5.0);
+                            }
+                        }
+                        
+                        ui.add_space(10.0);
+                        
+                        // UI for creating a new stable channel
+                        ui.label("Designate Stable Channel:");
+                        
+                        ui.horizontal(|ui| {
+                            ui.label("Channel ID:");
+                            ui.text_edit_singleline(&mut self.selected_channel_id);
+                        });
+                        
+                        ui.horizontal(|ui| {
+                            ui.label("Target USD amount:");
+                            ui.text_edit_singleline(&mut self.stable_channel_amount);
+                        });
+                        
+                        let button_color = egui::Color32::from_rgba_premultiplied(247, 147, 26, 200);
+                        if ui.add(
+                            egui::Button::new("Designate as Stable")
+                                .fill(button_color)
+                                .min_size(egui::vec2(150.0, 30.0))
+                        ).clicked() {
+                            self.designate_stable_channel();
+                        }
                     });
                     
                     ui.add_space(20.0);
@@ -551,7 +782,6 @@ pub fn run() {
         "Lightning Service Provider",
         native_options,
         Box::new(|_cc| {
-            // Create the app with initialized LDK node
             Ok(Box::new(LspApp::new()))
         }),
     ).unwrap_or_else(|e| {

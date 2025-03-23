@@ -26,14 +26,14 @@ const DEFAULT_NETWORK: &str = "signet";
 #[cfg(feature = "user")]
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 #[cfg(feature = "user")]
-const DEFAULT_LSP_PUBKEY: &str = "03cd003757e0b02089abefeaa68b48965d6eac77c456a4d915a60016e76994a881";
+const DEFAULT_LSP_PUBKEY: &str = "032ece84448a29e5dbd7f3325b280b84490bef6cffa397d9da0c811fc4971d66ec";
 #[cfg(feature = "user")]
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 #[cfg(feature = "user")]
 const DEFAULT_LSP_AUTH: &str = "00000000000000000000000000000000";
 #[cfg(feature = "user")]
-const EXPECTED_USD: f64 = 15.0;
-const DEFAULT_GATEWAY_PUBKEY: &str = "033232aa4a2a78ca7e7e61d8378fa5398e7112e86f8a62684ab6513d1f3f4598bc";
+const EXPECTED_USD: f64 = 8.0;
+const DEFAULT_GATEWAY_PUBKEY: &str = "034e2a8f45b1ea43fb67780bf39116a8956f220a9289e5aa45309d6e47b0acc1aa";
 
 /// This is the main app state for the user interface
 #[cfg(feature = "user")]
@@ -177,7 +177,7 @@ impl UserApp {
         let expected_usd = USD::from_f64(EXPECTED_USD);
         let agent = ureq::Agent::new();
         let latest_price = get_latest_price(&agent);
-        let price = latest_price.expect("latest_price fetch failed");
+        let price = latest_price.unwrap_or(8500.0); // TODO fix
 
         // Use the first available channel, if any
         let channel = node.list_channels().into_iter().next();
@@ -273,7 +273,7 @@ impl UserApp {
         
 
         let result = self.node.bolt11_payment().receive_via_jit_channel(
-            20_000_000, 
+            10_000_000, 
             &description,
             3600, // 1 hour expiry
             Some(1_000_000), // minimum channel size of 10k sats
