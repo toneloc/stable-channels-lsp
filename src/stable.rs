@@ -108,10 +108,15 @@ pub fn initialize_stable_channel(
 }
 
 /// Check stability, do appropriate payment or accounting
-pub fn check_stability(node: &Node, sc: &mut StableChannel) {
+pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
     println!("\n=== CHECKING CHANNEL STABILITY ===");
     
+    // Update the price in the stable channel
+    sc.latest_price = price;
+    
+    // Get updated balances with the current price
     let (success, updated_sc) = update_balances(node, sc.clone());
+    
     if success { 
         *sc = updated_sc;
         println!("✓ Channel balances updated successfully");

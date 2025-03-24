@@ -5,6 +5,7 @@ use ldk_node::{
     lightning::ln::msgs::SocketAddress,
     lightning_invoice::Bolt11Invoice,
 };
+use ureq::Agent;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use image::{GrayImage, Luma};
@@ -57,7 +58,7 @@ impl UserApp {
         // Additional setup specific to the user node
         
         // Connect to LSP if available
-        if let Some(key) = lsp_pubkey {
+        if let Some(key) = lsp_pubkey.clone() {
             if let Ok(socket_addr) = DEFAULT_LSP_ADDRESS.parse::<std::net::SocketAddr>() {
                 println!("Setting LSP with address: {} and pubkey: {}", 
                          DEFAULT_LSP_ADDRESS, key);
@@ -73,10 +74,26 @@ impl UserApp {
             }
         }
         
+        // Initialize price (ensure we have a valid price before proceeding)
+        let current_price = crate::price_feeds::get_cached_price();
+        if current_price <= 0.0 {
+            // If cache is empty, try to get a fresh price
+            let agent = Agent::new();
+            if let Ok(price) = crate::price_feeds::get_latest_price(&agent) {
+                base.btc_price = price;
+            }
+        } else {
+            base.btc_price = current_price;
+        }
+        
         // Create an empty stable channel with default values
+        let default_lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY).unwrap_or_else(|_| {
+            panic!("Invalid LSP pubkey: {}", DEFAULT_LSP_PUBKEY);
+        });
+        
         let stable_channel = StableChannel {
             channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes([0u8; 32]),
-            counterparty: lsp_pubkey.unwrap_or_else(|| PublicKey::from_str(DEFAULT_LSP_PUBKEY).unwrap()),
+            counterparty: lsp_pubkey.unwrap_or(default_lsp_pubkey),
             is_stable_receiver: true,
             expected_usd: USD::from_f64(EXPECTED_USD),
             expected_btc: Bitcoin::from_usd(USD::from_f64(EXPECTED_USD), base.btc_price),
@@ -106,8 +123,9 @@ impl UserApp {
             last_stability_check: Instant::now(),
         };
         
-        // Initialize stability
-        crate::stable::check_stability(&app.base.node, &mut app.stable_channel);
+        // Initialize stability with the current price
+        let current_price = app.base.btc_price;
+        crate::stable::check_stability(&app.base.node, &mut app.stable_channel, current_price);
         
         app
     }
@@ -189,7 +207,6 @@ impl UserApp {
                 
                 ldk_node::Event::PaymentReceived { amount_msat, .. } => {
                     self.base.status_message = format!("Received payment of {} msats", amount_msat);
-                    crate::stable::check_stability(&self.base.node, &mut self.stable_channel);
                 }
                 
                 ldk_node::Event::ChannelClosed { channel_id, .. } => {
@@ -491,18 +508,31 @@ impl App for UserApp {
         // Process events
         self.process_events();
         
-        // Update stability and price periodically
         if self.last_stability_check.elapsed() > Duration::from_secs(30) {
-            if let Ok(latest_price) = get_latest_price(&ureq::Agent::new()) {
-                self.base.btc_price = latest_price;
-                self.stable_channel.latest_price = latest_price;
-                crate::stable::check_stability(&self.base.node, &mut self.stable_channel);
+            // Get the current cached price (this will trigger an update if needed)
+            let current_price = crate::price_feeds::get_cached_price();
+            
+            // Skip stability check if we don't have a valid price yet
+            if current_price > 0.0 {
+                // Update the app's price
+                self.base.btc_price = current_price;
+                
+                // Run stability check with the current price
+                crate::stable::check_stability(&self.base.node, &mut self.stable_channel, current_price);
+            } else {
+                println!("Skipping stability check: No valid price available");
+            }
+            
+            // Always update this timestamp
+            self.last_stability_check = Instant::now();
+            
+            // Update the last update timestamp if we got a valid price
+            if current_price > 0.0 {
                 self.base.last_update = Instant::now();
             }
-            self.last_stability_check = Instant::now();
         }
-        
-        // Show the appropriate screen based on app state
+
+        // Now, actually show the UI:
         if self.waiting_for_payment {
             self.show_waiting_for_payment_screen(ctx);
         } else if self.show_onboarding {
@@ -510,6 +540,9 @@ impl App for UserApp {
         } else {
             self.show_main_screen(ctx);
         }
+
+        // Request a repaint
+        ctx.request_repaint_after(Duration::from_millis(100));
         
         // Request a repaint to keep the UI responsive
         ctx.request_repaint_after(Duration::from_millis(100));

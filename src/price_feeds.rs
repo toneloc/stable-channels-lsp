@@ -1,7 +1,24 @@
 use ureq::Agent;
 use serde_json::Value;
 use std::error::Error;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use retry::{retry, delay::Fixed};
+
+lazy_static::lazy_static! {
+    static ref PRICE_CACHE: Arc<Mutex<PriceCache>> = Arc::new(Mutex::new(PriceCache {
+        price: 0.0,
+        last_update: Instant::now() - Duration::from_secs(10),
+        updating: false,
+    }));
+}
+
+// A very simple price cache structure
+pub struct PriceCache {
+    price: f64,
+    last_update: Instant,
+    updating: bool,
+}
 
 pub struct PriceFeed {
     pub name: String,
@@ -17,6 +34,43 @@ impl PriceFeed {
             jsonpath: jsonpath.iter().map(|&s| s.to_string()).collect(),
         }
     }
+}
+
+// Get cached price or fetch a new one if needed
+pub fn get_cached_price() -> f64 {
+    // First check if we need to update
+    let should_update = {
+        let cache = PRICE_CACHE.lock().unwrap();
+        cache.last_update.elapsed() > Duration::from_secs(5) && !cache.updating
+    };
+    
+    // If update is needed
+    if should_update {
+        // Get the lock again and mark as updating
+        let mut cache = PRICE_CACHE.lock().unwrap();
+        cache.updating = true;
+        drop(cache); // Release the lock
+        
+        // Try to fetch a new price
+        let agent = Agent::new();
+        if let Ok(new_price) = get_latest_price(&agent) {
+            // Update the cache with new price
+            let mut cache = PRICE_CACHE.lock().unwrap();
+            cache.price = new_price;
+            cache.last_update = Instant::now();
+            cache.updating = false;
+            return new_price;
+        } else {
+            // Update failed, just clear the updating flag
+            let mut cache = PRICE_CACHE.lock().unwrap();
+            cache.updating = false;
+            return cache.price; // Return the existing price
+        }
+    }
+    
+    // No update needed, just return current price
+    let cache = PRICE_CACHE.lock().unwrap();
+    cache.price
 }
 
 pub fn set_price_feeds() -> Vec<PriceFeed> {
