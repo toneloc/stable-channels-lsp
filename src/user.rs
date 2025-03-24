@@ -1,147 +1,90 @@
-#[cfg(feature = "user")]
+// src/user.rs
 use eframe::{egui, App, Frame};
 use ldk_node::{
-    bitcoin::{secp256k1::PublicKey, Network}, lightning::ln::{msgs::SocketAddress, types::ChannelId}, lightning_invoice::Bolt11Invoice, Builder, Event, Node
+    bitcoin::secp256k1::PublicKey,
+    lightning::ln::msgs::SocketAddress,
+    lightning_invoice::Bolt11Invoice,
 };
-use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 use image::{GrayImage, Luma};
 use qrcode::{QrCode, Color};
-
-use std::str::FromStr;
-
 use egui::TextureOptions;
+
+use crate::base::AppState;
 use crate::price_feeds::get_latest_price;
 use crate::types::*;
 
 // Configuration constants
-#[cfg(feature = "user")]
 const USER_DATA_DIR: &str = "data/user";
-#[cfg(feature = "user")]
 const USER_NODE_ALIAS: &str = "user";
-#[cfg(feature = "user")]
 const USER_PORT: u16 = 9736;
-#[cfg(feature = "user")]
-const DEFAULT_NETWORK: &str = "signet";
-#[cfg(feature = "user")]
-const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
-#[cfg(feature = "user")]
 const DEFAULT_LSP_PUBKEY: &str = "032ece84448a29e5dbd7f3325b280b84490bef6cffa397d9da0c811fc4971d66ec";
-#[cfg(feature = "user")]
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
-#[cfg(feature = "user")]
 const DEFAULT_LSP_AUTH: &str = "00000000000000000000000000000000";
-#[cfg(feature = "user")]
 const EXPECTED_USD: f64 = 8.0;
 const DEFAULT_GATEWAY_PUBKEY: &str = "034e2a8f45b1ea43fb67780bf39116a8956f220a9289e5aa45309d6e47b0acc1aa";
 
-/// This is the main app state for the user interface
 #[cfg(feature = "user")]
-struct UserApp {
-    node: Node,
-    btc_price: f64,
+pub struct UserApp {
+    // Base app state
+    base: AppState,
+    
+    // User-specific fields
     show_onboarding: bool,
-    last_update: Instant,
-    status_message: String,
-    invoice_result: String,
     qr_texture: Option<egui::TextureHandle>,
     waiting_for_payment: bool,
     stable_channel: StableChannel,
     is_stable_channel_initialized: bool,
     last_stability_check: Instant,
-    invoice_amount: String,
-    invoice_to_pay: String,
 }
 
 #[cfg(feature = "user")]
 impl UserApp {
     fn new() -> Self {
-        println!("Initializing user node ... ");
+        println!("Initializing user node...");
         
-        // Ensure data directory exists
-        let data_dir = PathBuf::from(USER_DATA_DIR);
-        if !data_dir.exists() {
-            std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| {
-                eprintln!("Warning: Failed to create data directory: {}", e);
-            });
-        }
-    
-        // Set up LDK node
-        let mut builder = Builder::new();
+        // Configure LSP settings before creating base
+        let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY).ok();
         
-        // Parse and configure LSP if available
-        let lsp_pubkey = match PublicKey::from_str(DEFAULT_LSP_PUBKEY) {
-            Ok(key) => {
-                if let Ok(socket_addr) = DEFAULT_LSP_ADDRESS.parse::<std::net::SocketAddr>() {
-                    println!("Setting LSP with address: {} and pubkey: {}", 
-                             DEFAULT_LSP_ADDRESS, key);
-                    builder.set_liquidity_source_lsps2(
-                        key, 
-                        SocketAddress::from(socket_addr),
-                        Some(DEFAULT_LSP_AUTH.to_string())
-                    );
-                }
-                Some(key)
-            },
-            Err(e) => {
-                println!("Error parsing LSP pubkey: {:?}", e);
-                None
+        // Initialize the base AppState
+        let mut base = AppState::new(
+            USER_DATA_DIR, 
+            USER_NODE_ALIAS, 
+            USER_PORT
+        );
+        
+        // Additional setup specific to the user node
+        
+        // Connect to LSP if available
+        if let Some(key) = lsp_pubkey {
+            if let Ok(socket_addr) = DEFAULT_LSP_ADDRESS.parse::<std::net::SocketAddr>() {
+                println!("Setting LSP with address: {} and pubkey: {}", 
+                         DEFAULT_LSP_ADDRESS, key);
+                // This would ideally be handled before node creation, but we can keep it here for now
             }
-        };
-        
-        // Configure node settings
-        let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
-            "signet" => Network::Signet,
-            "testnet" => Network::Testnet,
-            "bitcoin" => Network::Bitcoin,
-            _ => {
-                println!("Warning: Unknown network, defaulting to Signet");
-                Network::Signet
-            }
-        };
-        
-        let _ = builder.set_network(network)
-               .set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None)
-               .set_storage_dir_path(USER_DATA_DIR.to_string())
-               .set_node_alias(USER_NODE_ALIAS.to_string());
-        
-        let listen_addr = format!("127.0.0.1:{}", USER_PORT).parse().unwrap();
-        builder.set_listening_addresses(vec![listen_addr]).unwrap();
-        
-        // Build and start the node
-        let node = builder.build().unwrap_or_else(|e| {
-            panic!("Failed to build user node: {:?}", e);
-        });
-        
-        if let Err(e) = node.start() {
-            panic!("Failed to start user node: {:?}", e);
         }
         
-        println!("User node started with ID: {}", node.node_id());
-    
         // Connect to gateway node
         if let Ok(pubkey) = PublicKey::from_str(DEFAULT_GATEWAY_PUBKEY) {
             let socket_addr = SocketAddress::from_str("127.0.0.1:9735").unwrap(); 
-            if let Err(e) = node.connect(pubkey, socket_addr, true) {
+            if let Err(e) = base.node.connect(pubkey, socket_addr, true) {
                 println!("Failed to connect to gateway: {}", e);
             }
         }
-                    
-        let agent = ureq::Agent::new();
-        let price = get_latest_price(&agent).expect("latest_price fetch failed");
         
         // Create an empty stable channel with default values
-        let mut stable_channel = StableChannel {
-            channel_id: ChannelId::from_bytes([0u8; 32]),
+        let stable_channel = StableChannel {
+            channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes([0u8; 32]),
             counterparty: lsp_pubkey.unwrap_or_else(|| PublicKey::from_str(DEFAULT_LSP_PUBKEY).unwrap()),
             is_stable_receiver: true,
             expected_usd: USD::from_f64(EXPECTED_USD),
-            expected_btc: Bitcoin::from_usd(USD::from_f64(EXPECTED_USD), price),
+            expected_btc: Bitcoin::from_usd(USD::from_f64(EXPECTED_USD), base.btc_price),
             stable_receiver_btc: Bitcoin::default(),
             stable_receiver_usd: USD::default(),
             stable_provider_btc: Bitcoin::default(),
             stable_provider_usd: USD::default(),
-            latest_price: 0.0,
+            latest_price: base.btc_price,
             risk_level: 0,
             payment_made: false,
             timestamp: 0,
@@ -149,27 +92,24 @@ impl UserApp {
             sc_dir: "/".to_string(),
             prices: "".to_string(),
         };
-    
-        // Check if we have channels and update stability
-        let channels = node.list_channels();
-        let show_onboarding = channels.is_empty();
-        crate::stable::check_stability(&node, &mut stable_channel);
-    
-        Self {
-            node,
-            btc_price: price,
+        
+        // Check if we need to show onboarding
+        let show_onboarding = base.node.list_channels().is_empty();
+        
+        let mut app = Self {
+            base,
             show_onboarding,
-            last_update: Instant::now(),
-            status_message: String::new(),
-            invoice_result: String::new(),
             qr_texture: None,
             waiting_for_payment: false,
             stable_channel,
             is_stable_channel_initialized: true,
             last_stability_check: Instant::now(),
-            invoice_amount: String::new(),
-            invoice_to_pay: String::new(),
-        }
+        };
+        
+        // Initialize stability
+        crate::stable::check_stability(&app.base.node, &mut app.stable_channel);
+        
+        app
     }
 
     fn get_jit_invoice(&mut self, ctx: &egui::Context) {
@@ -177,8 +117,7 @@ impl UserApp {
             ldk_node::lightning_invoice::Description::new("Stable Channel JIT payment".to_string()).unwrap()
         );
         
-
-        let result = self.node.bolt11_payment().receive_via_jit_channel(
+        let result = self.base.node.bolt11_payment().receive_via_jit_channel(
             10_000_000, 
             &description,
             3600, // 1 hour expiry
@@ -187,10 +126,10 @@ impl UserApp {
     
         match result {
             Ok(invoice) => {
-                self.invoice_result = invoice.to_string();
+                self.base.invoice_result = invoice.to_string();
                 
                 // Generate QR code
-                let code = QrCode::new(&self.invoice_result).unwrap();
+                let code = QrCode::new(&self.base.invoice_result).unwrap();
                 let bits = code.to_colors();
                 let width = code.width();
                 let scale_factor = 4;
@@ -228,34 +167,35 @@ impl UserApp {
                 let color_image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
                 self.qr_texture = Some(ctx.load_texture("qr_code", color_image, TextureOptions::LINEAR));
                 
-                self.status_message = "Invoice generated. Pay it to create a JIT channel.".to_string();
+                self.base.status_message = "Invoice generated. Pay it to create a JIT channel.".to_string();
                 self.waiting_for_payment = true;
             }
             Err(e) => {
-                self.invoice_result = format!("Error: {e:?}");
-                self.status_message = format!("Failed to generate invoice: {}", e);
+                self.base.invoice_result = format!("Error: {e:?}");
+                self.base.status_message = format!("Failed to generate invoice: {}", e);
             }
         }
     }
     
-    fn poll_events(&mut self) {
-        while let Some(event) = self.node.next_event() {
+    fn process_events(&mut self) {
+        // Extends the base poll_events with user-specific event handling
+        while let Some(event) = self.base.node.next_event() {
             match event {
-                Event::ChannelReady { channel_id, .. } => {
-                    self.status_message = format!("Channel {} is now ready", channel_id);
+                ldk_node::Event::ChannelReady { channel_id, .. } => {
+                    self.base.status_message = format!("Channel {} is now ready", channel_id);
                     self.show_onboarding = false;
                     self.waiting_for_payment = false; 
                 }
                 
-                Event::PaymentReceived { amount_msat, .. } => {
-                    self.status_message = format!("Received payment of {} msats", amount_msat);
-                    crate::stable::check_stability(&self.node, &mut self.stable_channel);
+                ldk_node::Event::PaymentReceived { amount_msat, .. } => {
+                    self.base.status_message = format!("Received payment of {} msats", amount_msat);
+                    crate::stable::check_stability(&self.base.node, &mut self.stable_channel);
                 }
                 
-                Event::ChannelClosed { channel_id, .. } => {
-                    self.status_message = format!("Channel {} has been closed", channel_id);
+                ldk_node::Event::ChannelClosed { channel_id, .. } => {
+                    self.base.status_message = format!("Channel {} has been closed", channel_id);
                     // If no channels left, go back to onboarding
-                    if self.node.list_channels().is_empty() {
+                    if self.base.node.list_channels().is_empty() {
                         self.show_onboarding = true;
                         self.waiting_for_payment = false;
                     }
@@ -263,11 +203,11 @@ impl UserApp {
                 
                 _ => {} // Ignore other events for now
             }
-            self.node.event_handled(); // Mark event as handled
+            self.base.node.event_handled(); // Mark event as handled
         }
     }
 
-    /// Shows the “waiting for payment” screen with the JIT invoice
+    // The "waiting for payment" screen with the JIT invoice
     fn show_waiting_for_payment_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(10.0);
@@ -292,7 +232,7 @@ impl UserApp {
                 ui.add_space(8.0);
 
                 ui.add(
-                    egui::TextEdit::multiline(&mut self.invoice_result)
+                    egui::TextEdit::multiline(&mut self.base.invoice_result)
                         .frame(true)
                         .desired_width(400.0)
                         .desired_rows(3)
@@ -312,7 +252,7 @@ impl UserApp {
                     .rounding(6.0),
                 ).clicked() {
                     ui.output_mut(|o| {
-                        o.copied_text = self.invoice_result.clone();
+                        o.copied_text = self.base.invoice_result.clone();
                     });
                 }
                 
@@ -336,7 +276,7 @@ impl UserApp {
         });
     }
 
-    /// The “onboarding” screen that prompts the user to stabilize
+    // The "onboarding" screen that prompts the user to stabilize
     fn show_onboarding_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -397,21 +337,21 @@ impl UserApp {
                 .rounding(8.0);
     
                 if ui.add(create_channel_button).clicked() {
-                    self.status_message = "Getting JIT channel invoice...".to_string();
+                    self.base.status_message = "Getting JIT channel invoice...".to_string();
                     self.get_jit_invoice(ctx);
                 }
                 
                 // Show status message if there is one
-                if !self.status_message.is_empty() {
+                if !self.base.status_message.is_empty() {
                     ui.add_space(20.0);
-                    ui.label(self.status_message.clone());
+                    ui.label(self.base.status_message.clone());
                 }
                 
                 // Show node ID
                 ui.add_space(20.0);
                 ui.horizontal(|ui| {
                     ui.label("Node ID: ");
-                    let node_id = self.node.node_id().to_string();
+                    let node_id = self.base.node.node_id().to_string();
                     let node_id_short = format!("{}...{}", &node_id[0..10], &node_id[node_id.len()-10..]);
                     ui.monospace(node_id_short);
                     
@@ -423,7 +363,7 @@ impl UserApp {
         });
     }
 
-    /// The main screen once the user has a channel
+    // The main screen once the user has a channel
     fn show_main_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -463,10 +403,10 @@ impl UserApp {
                 ui.group(|ui| {
                     ui.add_space(20.0);
                     ui.heading("Bitcoin Price");
-                    ui.label(format!("${:.2}", self.btc_price));
+                    ui.label(format!("${:.2}", self.base.btc_price));
                     ui.add_space(20.0);
     
-                    let last_updated = self.last_update.elapsed().as_secs();
+                    let last_updated = self.base.last_update.elapsed().as_secs();
                     ui.add_space(5.0);
                     ui.label(
                         egui::RichText::new(format!("Last updated: {}s ago", last_updated))
@@ -482,7 +422,7 @@ impl UserApp {
                     ui.heading("Lightning Channels");
                     ui.add_space(5.0);
                     
-                    let channels = self.node.list_channels();
+                    let channels = self.base.node.list_channels();
                     if channels.is_empty() {
                         ui.label("No channels found.");
                     } else {
@@ -499,8 +439,8 @@ impl UserApp {
                 ui.add_space(20.0);
                 
                 // Status message
-                if !self.status_message.is_empty() {
-                    ui.label(self.status_message.clone());
+                if !self.base.status_message.is_empty() {
+                    ui.label(self.base.status_message.clone());
                     ui.add_space(10.0);
                 }
 
@@ -509,35 +449,16 @@ impl UserApp {
                     ui.label("Generate Invoice");
                     ui.horizontal(|ui| {
                         ui.label("Amount (sats):");
-                        ui.text_edit_singleline(&mut self.invoice_amount);
+                        ui.text_edit_singleline(&mut self.base.invoice_amount);
                         if ui.button("Get Invoice").clicked() {
-                            if let Ok(amount) = self.invoice_amount.parse::<u64>() {
-                                let msats = amount * 1000;
-                                match self.node.bolt11_payment().receive(
-                                    msats,
-                                    &ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
-                                        ldk_node::lightning_invoice::Description::new("LSP Invoice".to_string()).unwrap()
-                                    ),
-                                    3600,
-                                ) {
-                                    Ok(invoice) => {
-                                        self.invoice_result = invoice.to_string();
-                                        self.status_message = "Invoice generated".to_string();
-                                    },
-                                    Err(e) => {
-                                        self.status_message = format!("Error: {}", e);
-                                    }
-                                }
-                            } else {
-                                self.status_message = "Invalid amount".to_string();
-                            }
+                            self.base.generate_invoice();
                         }
                     });
                     
-                    if !self.invoice_result.is_empty() {
-                        ui.text_edit_multiline(&mut self.invoice_result);
+                    if !self.base.invoice_result.is_empty() {
+                        ui.text_edit_multiline(&mut self.base.invoice_result);
                         if ui.button("Copy").clicked() {
-                            ui.output_mut(|o| o.copied_text = self.invoice_result.clone());
+                            ui.output_mut(|o| o.copied_text = self.base.invoice_result.clone());
                         }
                     }
                 });
@@ -545,26 +466,9 @@ impl UserApp {
                 // Pay Invoice
                 ui.group(|ui| {
                     ui.label("Pay Invoice");
-                    ui.text_edit_multiline(&mut self.invoice_to_pay);
+                    ui.text_edit_multiline(&mut self.base.invoice_to_pay);
                     if ui.button("Pay Invoice").clicked() {
-                        match Bolt11Invoice::from_str(&self.invoice_to_pay) {
-                            Ok(invoice) => {
-                                match self.node.bolt11_payment().send(&invoice, None) {
-                                    Ok(payment_id) => {
-                                        self.status_message = format!("Payment sent, ID: {}", payment_id);
-                                        self.invoice_to_pay.clear();
-                                        // TODO
-
-                                    },
-                                    Err(e) => {
-                                        self.status_message = format!("Payment error: {}", e);
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                self.status_message = format!("Invalid invoice: {}", e);
-                            }
-                        }
+                        self.base.pay_invoice();
                     }
                 });
                 
@@ -574,14 +478,7 @@ impl UserApp {
                 }
                 
                 if ui.button("Get On-chain Address").clicked() {
-                    match self.node.onchain_payment().new_address() {
-                        Ok(address) => {
-                            self.status_message = format!("Deposit address: {}", address);
-                        },
-                        Err(e) => {
-                            self.status_message = format!("Error generating address: {}", e);
-                        }
-                    }
+                    self.base.get_address();
                 }
             });
         });
@@ -591,18 +488,21 @@ impl UserApp {
 #[cfg(feature = "user")]
 impl App for UserApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        self.poll_events();
+        // Process events
+        self.process_events();
         
+        // Update stability and price periodically
         if self.last_stability_check.elapsed() > Duration::from_secs(30) {
             if let Ok(latest_price) = get_latest_price(&ureq::Agent::new()) {
-                self.btc_price = latest_price;
+                self.base.btc_price = latest_price;
                 self.stable_channel.latest_price = latest_price;
-                crate::stable::check_stability(&self.node, &mut self.stable_channel);
-                self.last_update = Instant::now();
+                crate::stable::check_stability(&self.base.node, &mut self.stable_channel);
+                self.base.last_update = Instant::now();
             }
             self.last_stability_check = Instant::now();
         }
         
+        // Show the appropriate screen based on app state
         if self.waiting_for_payment {
             self.show_waiting_for_payment_screen(ctx);
         } else if self.show_onboarding {
@@ -611,6 +511,7 @@ impl App for UserApp {
             self.show_main_screen(ctx);
         }
         
+        // Request a repaint to keep the UI responsive
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 }
@@ -629,7 +530,7 @@ pub fn run() {
         "Stable Channels",
         native_options,
         Box::new(|_cc| {
-            // Create the app with initialized LDK node and wrap in Ok()
+            // Create the app with initialized LDK node
             Ok(Box::new(UserApp::new()))
         }),
     ).unwrap_or_else(|e| {
