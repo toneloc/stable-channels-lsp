@@ -75,53 +75,9 @@ impl LspApp {
             last_stability_check: Instant::now(),
         };
         
-        // No need to update balances as base.new() already does this
-        
         app
     }
-    
-    fn initialize_stable_channels(&mut self) {
-        self.stable_channels.clear();
-        
-        for channel in self.base.node.list_channels() {
-            let is_stable_receiver = false;
-            
-            let expected_usd = USD::from_f64(EXPECTED_USD);
-            let expected_btc = Bitcoin::from_usd(expected_usd, self.base.btc_price);
-            
-            let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
-            let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
-            let their_balance_sats = channel.channel_value_sats - our_balance_sats;
-            
-            let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
-            let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
-            
-            let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.base.btc_price);
-            let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.base.btc_price);
-            
-            let stable_channel = StableChannel {
-                channel_id: channel.channel_id,
-                counterparty: channel.counterparty_node_id,
-                is_stable_receiver,
-                expected_usd,
-                expected_btc,
-                stable_receiver_btc,
-                stable_receiver_usd,
-                stable_provider_btc,
-                stable_provider_usd,
-                latest_price: self.base.btc_price,
-                risk_level: 0,
-                payment_made: false,
-                timestamp: 0,
-                formatted_datetime: "".to_string(),
-                sc_dir: LSP_DATA_DIR.to_string(),
-                prices: "".to_string(),
-            };
-            
-            self.stable_channels.push(stable_channel);
-        }
-    }
-    
+     
     fn designate_stable_channel(&mut self) {
         if self.selected_channel_id.is_empty() {
             self.base.status_message = "Please select a channel ID".to_string();

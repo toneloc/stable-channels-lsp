@@ -20,7 +20,7 @@ use crate::types::*;
 const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
-const DEFAULT_LSP_PUBKEY: &str = "032ece84448a29e5dbd7f3325b280b84490bef6cffa397d9da0c811fc4971d66ec";
+const DEFAULT_LSP_PUBKEY: &str = "032a43065fac39f6238ca5adf2972dab14e4b98dcce6c8333ede4733816d70090c";
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const DEFAULT_LSP_AUTH: &str = "00000000000000000000000000000000";
 const EXPECTED_USD: f64 = 8.0;
@@ -136,7 +136,7 @@ impl UserApp {
         );
         
         let result = self.base.node.bolt11_payment().receive_via_jit_channel(
-            10_000_000, 
+            1_000_000, 
             &description,
             3600, // 1 hour expiry
             Some(1_000_000), // minimum channel size of 10k sats
@@ -348,10 +348,10 @@ impl UserApp {
                         .color(egui::Color32::WHITE)
                         .strong()
                         .size(18.0),
-                )
-                .min_size(egui::vec2(200.0, 55.0))
-                .fill(subtle_orange)
-                .rounding(8.0);
+                        )
+                    .min_size(egui::vec2(200.0, 55.0))
+                    .fill(subtle_orange)
+                    .rounding(8.0);
     
                 if ui.add(create_channel_button).clicked() {
                     self.base.status_message = "Getting JIT channel invoice...".to_string();
