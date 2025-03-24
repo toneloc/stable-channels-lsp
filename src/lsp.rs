@@ -1,16 +1,17 @@
+// src/lsp.rs
 use eframe::{egui, App, Frame};
 use ldk_node::{
     bitcoin::{Network, Address, secp256k1::PublicKey},
     lightning_invoice::Bolt11Invoice,
     lightning::ln::{msgs::SocketAddress, types::ChannelId},
-    Builder, Node, Event, liquidity::LSPS2ServiceConfig,
+    config::ChannelConfig,
+    Builder, Node, liquidity::LSPS2ServiceConfig
 };
-use std::path::PathBuf;
 use std::str::FromStr;
-use hex;
 use std::time::{Duration, Instant};
+use hex;
 
-use crate::price_feeds::get_latest_price;
+use crate::base::AppState;
 use crate::types::*;
 use crate::stable;
 
@@ -18,31 +19,15 @@ use crate::stable;
 const LSP_DATA_DIR: &str = "data/lsp";
 const LSP_NODE_ALIAS: &str = "lsp";
 const LSP_PORT: u16 = 9737;
-const DEFAULT_NETWORK: &str = "signet";
-const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 const EXPECTED_USD: f64 = 15.0;  // Default expected USD value for stable channels
 
 #[cfg(feature = "lsp")]
-struct LspApp {
-    node: Node,
-    invoice_amount: String,
-    invoice_result: String,
-    invoice_to_pay: String,
-    on_chain_address: String,
-    on_chain_amount: String,
-    status_message: String,
-    last_update: Instant,
-    channel_info: String,
-    lightning_balance_btc: f64,
-    onchain_balance_btc: f64,
-    btc_price: f64,
-    lightning_balance_usd: f64,
-    onchain_balance_usd: f64,
-    total_balance_btc: f64,
-    total_balance_usd: f64,
-    channel_id_to_close: String,
+pub struct LspApp {
+    // Base app state with common fields
+    base: AppState,
     
-    // Stable channel related fields
+    // LSP-specific fields
+    channel_id_to_close: String,
     stable_channels: Vec<StableChannel>,
     selected_channel_id: String,
     stable_channel_amount: String,
@@ -54,14 +39,7 @@ impl LspApp {
     fn new() -> Self {
         println!("Initializing LSP node...");
         
-        // Ensure data directory exists
-        let data_dir = PathBuf::from(LSP_DATA_DIR);
-        if !data_dir.exists() {
-            std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| {
-                eprintln!("Warning: Failed to create data directory: {}", e);
-            });
-        }
-
+        // Create a node builder
         let mut builder = Builder::new();
         
         // Configure LSPS2 service
@@ -79,134 +57,35 @@ impl LspApp {
 
         builder.set_liquidity_provider_lsps2(service_config);
         
-        // Configure the network
-        let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
-            "signet" => Network::Signet,
-            "testnet" => Network::Testnet,
-            "bitcoin" => Network::Bitcoin,
-            _ => {
-                println!("Warning: Unknown network in config, defaulting to Signet");
-                Network::Signet
-            }
-        };
-        
-        println!("Setting network to: {:?}", network);
-        builder.set_network(network);
-        
-        // Set up Esplora chain source
-        println!("Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
-        builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
-        
-        // Set up data directory
-        println!("Setting storage directory: {}", LSP_DATA_DIR);
-        builder.set_storage_dir_path(LSP_DATA_DIR.to_string());
-        
-        // Set up listening address for the LSP node
-        let listen_addr = format!("127.0.0.1:{}", LSP_PORT).parse().unwrap();
-        println!("Setting listening address: {}", listen_addr);
-        builder.set_listening_addresses(vec![listen_addr]).unwrap();
-        
-        // Set node alias
-        builder.set_node_alias(LSP_NODE_ALIAS.to_string());
-        
-        // Build the node
-        let node = match builder.build() {
-            Ok(node) => {
-                println!("LSP node built successfully");
-                node
-            },
-            Err(e) => {
-                panic!("Failed to build LSP node: {:?}", e);
-            }
-        };
-        
-        // Start the node
-        if let Err(e) = node.start() {
-            panic!("Failed to start LSP node: {:?}", e);
-        }
-        
-        println!("LSP node started with ID: {}", node.node_id());
-        
-        // Get initial BTC price
-        let agent = ureq::Agent::new();
-        let btc_price = get_latest_price(&agent).unwrap_or(55000.0);
+        // Initialize the base AppState with our custom builder
+        let base = AppState::new(
+            LSP_DATA_DIR, 
+            LSP_NODE_ALIAS, 
+            LSP_PORT
+        );
         
         let mut app = Self {
-            node,
-            invoice_amount: "10000".to_string(), // Default 10k sats
-            invoice_result: String::new(),
-            invoice_to_pay: String::new(),
-            on_chain_address: String::new(),
-            on_chain_amount: "10000".to_string(), // Default 10k sats
-            status_message: String::new(),
-            last_update: Instant::now(),
-            channel_info: String::new(),
-            lightning_balance_btc: 0.0,
-            onchain_balance_btc: 0.0,
-            btc_price,
-            lightning_balance_usd: 0.0,
-            onchain_balance_usd: 0.0,
-            total_balance_btc: 0.0,
-            total_balance_usd: 0.0,
+            base,
             channel_id_to_close: String::new(),
-            
-            // Initialize stable channel fields
             stable_channels: Vec::new(),
             selected_channel_id: String::new(),
-            stable_channel_amount: EXPECTED_USD.to_string(),  // Default to $15
+            stable_channel_amount: EXPECTED_USD.to_string(),
             last_stability_check: Instant::now(),
         };
         
-        // Update balances once initially
-        app.update_balances();
-        app.update_channel_info();
-        
-        // Initialize stable channels from existing channels
-        // app.initialize_stable_channels();
+        // No need to update balances as base.new() already does this
         
         app
-    }
-    
-    fn update_balances(&mut self) {
-        let balances = self.node.list_balances();
-        
-        self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
-        self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
-        
-        self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
-        self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
-        
-        self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
-        self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
-        
-        #[cfg(feature = "lsp")]
-        {
-            if let Ok(latest_price) = std::panic::catch_unwind(|| {
-                crate::price_feeds::get_latest_price(&ureq::Agent::new()).unwrap_or(self.btc_price)
-            }) {
-                if latest_price > 0.0 {
-                    self.btc_price = latest_price;
-                    self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
-                    self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
-                    self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
-                    
-                    // Update price in all stable channels
-                    for sc in &mut self.stable_channels {
-                        sc.latest_price = latest_price;
-                    }
-                }
-            }
-        }
     }
     
     fn initialize_stable_channels(&mut self) {
         self.stable_channels.clear();
         
-        for channel in self.node.list_channels() {
+        for channel in self.base.node.list_channels() {
             let is_stable_receiver = false;
             
             let expected_usd = USD::from_f64(EXPECTED_USD);
-            let expected_btc = Bitcoin::from_usd(expected_usd, self.btc_price);
+            let expected_btc = Bitcoin::from_usd(expected_usd, self.base.btc_price);
             
             let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
             let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
@@ -215,8 +94,8 @@ impl LspApp {
             let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
             let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
             
-            let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
-            let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
+            let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.base.btc_price);
+            let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.base.btc_price);
             
             let stable_channel = StableChannel {
                 channel_id: channel.channel_id,
@@ -228,7 +107,7 @@ impl LspApp {
                 stable_receiver_usd,
                 stable_provider_btc,
                 stable_provider_usd,
-                latest_price: self.btc_price,
+                latest_price: self.base.btc_price,
                 risk_level: 0,
                 payment_made: false,
                 timestamp: 0,
@@ -243,26 +122,26 @@ impl LspApp {
     
     fn designate_stable_channel(&mut self) {
         if self.selected_channel_id.is_empty() {
-            self.status_message = "Please select a channel ID".to_string();
+            self.base.status_message = "Please select a channel ID".to_string();
             return;
         }
         
         let amount = match self.stable_channel_amount.parse::<f64>() {
             Ok(val) => val,
             Err(_) => {
-                self.status_message = "Invalid amount format".to_string();
+                self.base.status_message = "Invalid amount format".to_string();
                 return;
             }
         };
         
         let channel_id_str = self.selected_channel_id.trim();
         
-        for channel in self.node.list_channels() {
+        for channel in self.base.node.list_channels() {
             let channel_id_string = channel.channel_id.to_string();
             
             if channel_id_string.contains(channel_id_str) {
                 let expected_usd = USD::from_f64(amount);
-                let expected_btc = Bitcoin::from_usd(expected_usd, self.btc_price);
+                let expected_btc = Bitcoin::from_usd(expected_usd, self.base.btc_price);
                 
                 let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
                 let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
@@ -271,8 +150,8 @@ impl LspApp {
                 let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
                 let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
                 
-                let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
-                let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
+                let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.base.btc_price);
+                let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.base.btc_price);
                 
                 let stable_channel = StableChannel {
                     channel_id: channel.channel_id,
@@ -284,7 +163,7 @@ impl LspApp {
                     stable_receiver_usd,
                     stable_provider_btc,
                     stable_provider_usd,
-                    latest_price: self.btc_price,
+                    latest_price: self.base.btc_price,
                     risk_level: 0,
                     payment_made: false,
                     timestamp: 0,
@@ -306,7 +185,7 @@ impl LspApp {
                     self.stable_channels.push(stable_channel);
                 }
                 
-                self.status_message = format!(
+                self.base.status_message = format!(
                     "Channel {} designated as stable with target amount of ${}",
                     channel_id_string, amount
                 );
@@ -318,81 +197,23 @@ impl LspApp {
             }
         }
         
-        self.status_message = format!("No channel found matching: {}", self.selected_channel_id);
+        self.base.status_message = format!("No channel found matching: {}", self.selected_channel_id);
     }
     
     fn check_and_update_stable_channels(&mut self) {
         for sc in &mut self.stable_channels {
-            if !stable::channel_exists(&self.node, &sc.channel_id) {
+            if !stable::channel_exists(&self.base.node, &sc.channel_id) {
                 continue;
             }
             
-            stable::check_stability(&self.node, sc);
-        }
-    }
-}
-
-#[cfg(feature = "lsp")]
-impl App for LspApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        self.poll_events();
-        
-        if self.last_update.elapsed() > Duration::from_secs(30) {
-            self.update_balances();
-            self.update_channel_info();
-            self.last_update = Instant::now();
-        }
-        
-        if self.last_stability_check.elapsed() > Duration::from_secs(10) {
-            self.check_and_update_stable_channels();
-            self.last_stability_check = Instant::now();
-        }
-        
-        self.show_lsp_screen(ctx);
-        
-        ctx.request_repaint_after(Duration::from_millis(100));
-    }
-}
-
-#[cfg(feature = "lsp")]
-impl LspApp {
-    fn poll_events(&mut self) {
-        while let Some(event) = self.node.next_event() {
-            match event {
-                Event::ChannelReady { channel_id, .. } => {
-                    self.status_message = format!("Channel {} is now ready", channel_id);
-                    self.update_channel_info();
-                    self.update_balances();
-                    
-                    // self.initialize_stable_channels();
-                }
-                
-                Event::PaymentReceived { amount_msat, .. } => {
-                    self.status_message = format!("Received payment of {} msats", amount_msat);
-                    self.update_channel_info();
-                    self.update_balances();
-                    // self.check_and_update_stable_channels();
-                }
-                
-                Event::ChannelClosed { channel_id, .. } => {
-                    self.status_message = format!("Channel {} has been closed", channel_id);
-                    self.update_channel_info();
-                    self.update_balances();
-                    
-                    // Remove closed channels from stable channels
-                    self.stable_channels.retain(|sc| sc.channel_id != channel_id);
-                }
-                
-                _ => {} // Ignore other events for now
-            }
-            self.node.event_handled(); // Mark event as handled
+            stable::check_stability(&self.base.node, sc);
         }
     }
     
-    fn update_channel_info(&mut self) {
-        let channels = self.node.list_channels();
+    fn update_channel_info(&mut self) -> String {
+        let channels = self.base.node.list_channels();
         if channels.is_empty() {
-            self.channel_info = "No channels found.".to_string();
+            return "No channels found.".to_string();
         } else {
             let mut info = String::new();
             for (i, channel) in channels.iter().enumerate() {
@@ -408,13 +229,13 @@ impl LspApp {
                     if is_stable { " [STABLE]" } else { "" }
                 ));
             }
-            self.channel_info = info;
+            return info;
         }
     }
     
     fn close_specific_channel(&mut self) {
         if self.channel_id_to_close.is_empty() {
-            self.status_message = "Please enter a channel ID to close".to_string();
+            self.base.status_message = "Please enter a channel ID to close".to_string();
             return;
         }
     
@@ -427,23 +248,23 @@ impl LspApp {
             match hex::decode(channel_id_str) {
                 Ok(bytes) if bytes.len() == 32 => {
                     let mut found = false;
-                    for channel in self.node.list_channels().iter() {
+                    for channel in self.base.node.list_channels().iter() {
                         // Compare the bytes of the channel ID
                         let channel_id_bytes = channel.channel_id.0.to_vec();
                         if channel_id_bytes == bytes {
                             found = true;
                             let user_channel_id = channel.user_channel_id.clone();
                             let counterparty_node_id = channel.counterparty_node_id;
-                            match self.node.close_channel(&user_channel_id, counterparty_node_id) {
+                            match self.base.node.close_channel(&user_channel_id, counterparty_node_id) {
                                 Ok(_) => {
-                                    self.status_message = format!("Closing channel with ID: {}", self.channel_id_to_close);
+                                    self.base.status_message = format!("Closing channel with ID: {}", self.channel_id_to_close);
                                     self.channel_id_to_close.clear(); // Clear the field after successful operation
                                     
                                     // Remove from stable channels if it was a stable channel
                                     self.stable_channels.retain(|sc| sc.channel_id != channel.channel_id);
                                 },
                                 Err(e) => {
-                                    self.status_message = format!("Error closing channel: {}", e);
+                                    self.base.status_message = format!("Error closing channel: {}", e);
                                 }
                             }
                             break;
@@ -451,33 +272,33 @@ impl LspApp {
                     }
                     
                     if !found {
-                        self.status_message = format!("No channel found with ID: {}", self.channel_id_to_close);
+                        self.base.status_message = format!("No channel found with ID: {}", self.channel_id_to_close);
                     }
                 },
                 _ => {
-                    self.status_message = "Invalid channel ID format".to_string();
+                    self.base.status_message = "Invalid channel ID format".to_string();
                 }
             }
         } else {
             // Try to find a channel with ID that contains the provided string
             // This allows for partial matching with formatted channel IDs
             let mut found = false;
-            for channel in self.node.list_channels().iter() {
+            for channel in self.base.node.list_channels().iter() {
                 let channel_id_string = channel.channel_id.to_string();
                 if channel_id_string.contains(channel_id_str) {
                     found = true;
                     let user_channel_id = channel.user_channel_id.clone();
                     let counterparty_node_id = channel.counterparty_node_id;
-                    match self.node.close_channel(&user_channel_id, counterparty_node_id) {
+                    match self.base.node.close_channel(&user_channel_id, counterparty_node_id) {
                         Ok(_) => {
-                            self.status_message = format!("Closing channel with ID: {}", channel_id_string);
+                            self.base.status_message = format!("Closing channel with ID: {}", channel_id_string);
                             self.channel_id_to_close.clear(); // Clear the field after successful operation
                             
                             // Remove from stable channels if it was a stable channel
                             self.stable_channels.retain(|sc| sc.channel_id != channel.channel_id);
                         },
                         Err(e) => {
-                            self.status_message = format!("Error closing channel: {}", e);
+                            self.base.status_message = format!("Error closing channel: {}", e);
                         }
                     }
                     break;
@@ -485,12 +306,14 @@ impl LspApp {
             }
             
             if !found {
-                self.status_message = format!("No channel found matching: {}", self.channel_id_to_close);
+                self.base.status_message = format!("No channel found matching: {}", self.channel_id_to_close);
             }
         }
     }
 
     fn show_lsp_screen(&mut self, ctx: &egui::Context) {
+        let channel_info = self.update_channel_info();
+        
         egui::CentralPanel::default().show(ctx, |ui| {
             // Add a scrollable area that encompasses the entire central panel
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -500,7 +323,7 @@ impl LspApp {
                     
                     // Node information
                     ui.group(|ui| {
-                        ui.label(format!("Node ID: {}", self.node.node_id()));
+                        ui.label(format!("Node ID: {}", self.base.node.node_id()));
                         ui.label(format!("Listening on: 127.0.0.1:{}", LSP_PORT));
                     });
                     
@@ -514,31 +337,31 @@ impl LspApp {
                         // Lightning balance
                         ui.horizontal(|ui| {
                             ui.label("Lightning:");
-                            ui.monospace(format!("{:.8} BTC", self.lightning_balance_btc));
-                            ui.monospace(format!("(${:.2})", self.lightning_balance_usd));
+                            ui.monospace(format!("{:.8} BTC", self.base.lightning_balance_btc));
+                            ui.monospace(format!("(${:.2})", self.base.lightning_balance_usd));
                         });
                         
                         // On-chain balance
                         ui.horizontal(|ui| {
                             ui.label("On-chain:  ");
-                            ui.monospace(format!("{:.8} BTC", self.onchain_balance_btc));
-                            ui.monospace(format!("(${:.2})", self.onchain_balance_usd));
+                            ui.monospace(format!("{:.8} BTC", self.base.onchain_balance_btc));
+                            ui.monospace(format!("(${:.2})", self.base.onchain_balance_usd));
                         });
                         
                         // Total balance
                         ui.horizontal(|ui| {
                             ui.label("Total:     ");
-                            ui.strong(format!("{:.8} BTC", self.total_balance_btc));
-                            ui.strong(format!("(${:.2})", self.total_balance_usd));
+                            ui.strong(format!("{:.8} BTC", self.base.total_balance_btc));
+                            ui.strong(format!("(${:.2})", self.base.total_balance_usd));
                         });
                         
                         ui.add_space(5.0);
                         ui.label(format!("Price: ${:.2} | Updated: {} seconds ago", 
-                                         self.btc_price,
-                                         self.last_update.elapsed().as_secs()));
+                                         self.base.btc_price,
+                                         self.base.last_update.elapsed().as_secs()));
                     });
                     
-                    // STABLE CHANNELS SECTION (New)
+                    // STABLE CHANNELS SECTION
                     ui.add_space(20.0);
                     ui.group(|ui| {
                         ui.heading("Stable Channels");
@@ -599,35 +422,16 @@ impl LspApp {
                         ui.label("Generate Invoice");
                         ui.horizontal(|ui| {
                             ui.label("Amount (sats):");
-                            ui.text_edit_singleline(&mut self.invoice_amount);
+                            ui.text_edit_singleline(&mut self.base.invoice_amount);
                             if ui.button("Get Invoice").clicked() {
-                                if let Ok(amount) = self.invoice_amount.parse::<u64>() {
-                                    let msats = amount * 1000;
-                                    match self.node.bolt11_payment().receive(
-                                        msats,
-                                        &ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
-                                            ldk_node::lightning_invoice::Description::new("LSP Invoice".to_string()).unwrap()
-                                        ),
-                                        3600,
-                                    ) {
-                                        Ok(invoice) => {
-                                            self.invoice_result = invoice.to_string();
-                                            self.status_message = "Invoice generated".to_string();
-                                        },
-                                        Err(e) => {
-                                            self.status_message = format!("Error: {}", e);
-                                        }
-                                    }
-                                } else {
-                                    self.status_message = "Invalid amount".to_string();
-                                }
+                                self.base.generate_invoice();
                             }
                         });
                         
-                        if !self.invoice_result.is_empty() {
-                            ui.text_edit_multiline(&mut self.invoice_result);
+                        if !self.base.invoice_result.is_empty() {
+                            ui.text_edit_multiline(&mut self.base.invoice_result);
                             if ui.button("Copy").clicked() {
-                                ui.output_mut(|o| o.copied_text = self.invoice_result.clone());
+                                ui.output_mut(|o| o.copied_text = self.base.invoice_result.clone());
                             }
                         }
                     });
@@ -637,26 +441,9 @@ impl LspApp {
                     // Pay Invoice
                     ui.group(|ui| {
                         ui.label("Pay Invoice");
-                        ui.text_edit_multiline(&mut self.invoice_to_pay);
+                        ui.text_edit_multiline(&mut self.base.invoice_to_pay);
                         if ui.button("Pay Invoice").clicked() {
-                            match Bolt11Invoice::from_str(&self.invoice_to_pay) {
-                                Ok(invoice) => {
-                                    match self.node.bolt11_payment().send(&invoice, None) {
-                                        Ok(payment_id) => {
-                                            self.status_message = format!("Payment sent, ID: {}", payment_id);
-                                            self.invoice_to_pay.clear();
-                                            // Update balances after payment
-                                            self.update_balances();
-                                        },
-                                        Err(e) => {
-                                            self.status_message = format!("Payment error: {}", e);
-                                        }
-                                    }
-                                },
-                                Err(e) => {
-                                    self.status_message = format!("Invalid invoice: {}", e);
-                                }
-                            }
+                            self.base.pay_invoice();
                         }
                     });
                     
@@ -666,21 +453,13 @@ impl LspApp {
                     ui.group(|ui| {
                         ui.label("On-chain Address");
                         if ui.button("Get Address").clicked() {
-                            match self.node.onchain_payment().new_address() {
-                                Ok(address) => {
-                                    self.on_chain_address = address.to_string();
-                                    self.status_message = "Address generated".to_string();
-                                },
-                                Err(e) => {
-                                    self.status_message = format!("Error: {}", e);
-                                }
-                            }
+                            self.base.get_address();
                         }
                         
-                        if !self.on_chain_address.is_empty() {
-                            ui.label(self.on_chain_address.clone());
+                        if !self.base.on_chain_address.is_empty() {
+                            ui.label(self.base.on_chain_address.clone());
                             if ui.button("Copy").clicked() {
-                                ui.output_mut(|o| o.copied_text = self.on_chain_address.clone());
+                                ui.output_mut(|o| o.copied_text = self.base.on_chain_address.clone());
                             }
                         }
                     });
@@ -692,40 +471,15 @@ impl LspApp {
                         ui.label("On-chain Send");
                         ui.horizontal(|ui| {
                             ui.label("Address:");
-                            ui.text_edit_singleline(&mut self.on_chain_address);
+                            ui.text_edit_singleline(&mut self.base.on_chain_address);
                         });
                         ui.horizontal(|ui| {
                             ui.label("Amount (sats):");
-                            ui.text_edit_singleline(&mut self.on_chain_amount);
+                            ui.text_edit_singleline(&mut self.base.on_chain_amount);
                         });
                         
                         if ui.button("Send On-chain").clicked() {
-                            if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
-                                match Address::from_str(&self.on_chain_address) {
-                                    Ok(addr) => match addr.require_network(Network::Signet) {
-                                        Ok(addr_checked) => {
-                                            match self.node.onchain_payment().send_to_address(&addr_checked, amount, None) {
-                                                Ok(txid) => {
-                                                    self.status_message = format!("Transaction sent: {}", txid);
-                                                    // Update balances after sending
-                                                    self.update_balances();
-                                                },
-                                                Err(e) => {
-                                                    self.status_message = format!("Transaction error: {}", e);
-                                                }
-                                            }
-                                        },
-                                        Err(_) => {
-                                            self.status_message = "Invalid address for this network".to_string();
-                                        }
-                                    },
-                                    Err(_) => {
-                                        self.status_message = "Invalid address".to_string();
-                                    }
-                                }
-                            } else {
-                                self.status_message = "Invalid amount".to_string();
-                            }
+                            self.base.send_onchain();
                         }
                     });
                     
@@ -750,21 +504,47 @@ impl LspApp {
                     ui.group(|ui| {
                         ui.label("Channels");
                         if ui.button("Refresh Channel List").clicked() {
-                            self.update_channel_info();
+                            // Channel info is already refreshed at the beginning of this method
                         }
                         
-                        ui.text_edit_multiline(&mut self.channel_info);
+                        ui.text_edit_multiline(&mut channel_info.clone());
                     });
                     
                     ui.add_space(10.0);
                     
                     // Status message
-                    if !self.status_message.is_empty() {
-                        ui.label(self.status_message.clone());
+                    if !self.base.status_message.is_empty() {
+                        ui.label(self.base.status_message.clone());
                     }
                 });
             });
         });
+    }
+}
+
+#[cfg(feature = "lsp")]
+impl App for LspApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        // Poll for LDK node events
+        self.base.poll_events();
+        
+        // Update balances and other info periodically
+        if self.base.last_update.elapsed() > Duration::from_secs(30) {
+            self.base.update_balances();
+            self.base.last_update = Instant::now();
+        }
+        
+        // Check stability of stable channels periodically
+        if self.last_stability_check.elapsed() > Duration::from_secs(10) {
+            self.check_and_update_stable_channels();
+            self.last_stability_check = Instant::now();
+        }
+        
+        // Show the LSP interface
+        self.show_lsp_screen(ctx);
+        
+        // Request a repaint frequently to keep the UI responsive
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
 }
 
@@ -782,6 +562,7 @@ pub fn run() {
         "Lightning Service Provider",
         native_options,
         Box::new(|_cc| {
+            // Create the app with initialized LDK node
             Ok(Box::new(LspApp::new()))
         }),
     ).unwrap_or_else(|e| {

@@ -1,6 +1,7 @@
 pub mod price_feeds;
 pub mod types;
 pub mod stable;
+pub mod base;
 
 #[cfg(feature = "user")]
 mod user;

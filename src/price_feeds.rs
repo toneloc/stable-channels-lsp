@@ -119,9 +119,10 @@ pub fn fetch_prices(
     Ok(prices)
 }
 
-pub fn calculate_median_price(
-    prices: Vec<(String, f64)>,
-) -> Result<f64, Box<dyn std::error::Error>> {
+pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
+    let price_feeds = set_price_feeds();
+    let prices = fetch_prices(agent, &price_feeds)?;
+    
     // Print all prices
     for (feed_name, price) in &prices {
         println!("{:<25} ${:>1.2}", feed_name, price);
@@ -137,12 +138,5 @@ pub fn calculate_median_price(
     };
 
     println!("\nMedian BTC/USD price:     ${:.2}\n", median_price);
-
     Ok(median_price)
-}
-
-pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
-    let price_feeds = set_price_feeds();
-    let prices = fetch_prices(agent, &price_feeds)?; // `?` now works because the function returns `Result`
-    calculate_median_price(prices) // This already returns `Result<f64, Box<dyn Error>>`
 }
