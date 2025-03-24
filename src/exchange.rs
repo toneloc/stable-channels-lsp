@@ -54,49 +54,17 @@ impl ExchangeApp {
                     ui.heading("Exchange");
                     ui.add_space(10.0);
                     
-                    // Node information
-                    ui.group(|ui| {
-                        ui.label(format!("Node ID: {}", self.base.node.node_id()));
-                        ui.label(format!("Listening on: 127.0.0.1:{}", EXCHANGE_PORT));
-                    });
+                    // Node information (using common component)
+                    self.base.show_node_info_section(ui, EXCHANGE_PORT);
                     
                     ui.add_space(20.0);
                     
-                    // BALANCE SECTION
-                    ui.group(|ui| {
-                        ui.heading("Balances");
-                        ui.add_space(5.0);
-                        
-                        // Lightning balance
-                        ui.horizontal(|ui| {
-                            ui.label("Lightning:");
-                            ui.monospace(format!("{:.8} BTC", self.base.lightning_balance_btc));
-                            ui.monospace(format!("(${:.2})", self.base.lightning_balance_usd));
-                        });
-                        
-                        // On-chain balance
-                        ui.horizontal(|ui| {
-                            ui.label("On-chain:  ");
-                            ui.monospace(format!("{:.8} BTC", self.base.onchain_balance_btc));
-                            ui.monospace(format!("(${:.2})", self.base.onchain_balance_usd));
-                        });
-                        
-                        // Total balance
-                        ui.horizontal(|ui| {
-                            ui.label("Total:     ");
-                            ui.strong(format!("{:.8} BTC", self.base.total_balance_btc));
-                            ui.strong(format!("(${:.2})", self.base.total_balance_usd));
-                        });
-                        
-                        ui.add_space(5.0);
-                        ui.label(format!("Price: ${:.2} | Updated: {} seconds ago", 
-                                         self.base.btc_price,
-                                         self.base.last_update.elapsed().as_secs()));
-                    });
+                    // Balance section (using common component)
+                    self.base.show_balance_section(ui);
                     
                     ui.add_space(20.0);
                     
-                    // Open Channel section
+                    // Open Channel section (exchange-specific, keep as is)
                     ui.group(|ui| {
                         ui.heading("Open Channel");
                         
@@ -130,85 +98,30 @@ impl ExchangeApp {
                     
                     ui.add_space(20.0);
                     
-                    // Get Invoice
-                    ui.group(|ui| {
-                        ui.label("Generate Invoice");
-                        ui.horizontal(|ui| {
-                            ui.label("Amount (sats):");
-                            ui.text_edit_singleline(&mut self.base.invoice_amount);
-                            if ui.button("Get Invoice").clicked() {
-                                self.base.generate_invoice();
-                            }
-                        });
-                        
-                        if !self.base.invoice_result.is_empty() {
-                            ui.text_edit_multiline(&mut self.base.invoice_result);
-                            if ui.button("Copy").clicked() {
-                                ui.output_mut(|o| o.copied_text = self.base.invoice_result.clone());
-                            }
-                        }
-                    });
+                    // Invoice section (using common component)
+                    self.base.show_invoice_section(ui);
                     
                     ui.add_space(10.0);
                     
-                    // Pay Invoice
-                    ui.group(|ui| {
-                        ui.label("Pay Invoice");
-                        ui.text_edit_multiline(&mut self.base.invoice_to_pay);
-                        if ui.button("Pay Invoice").clicked() {
-                            self.base.pay_invoice();
-                        }
-                    });
+                    // Pay Invoice section (using common component)
+                    self.base.show_pay_invoice_section(ui);
                     
                     ui.add_space(10.0);
                     
-                    // Get On-chain Address
-                    ui.group(|ui| {
-                        ui.label("On-chain Address");
-                        if ui.button("Get Address").clicked() {
-                            self.base.get_address();
-                        }
-                        
-                        if !self.base.on_chain_address.is_empty() {
-                            ui.label(self.base.on_chain_address.clone());
-                            if ui.button("Copy").clicked() {
-                                ui.output_mut(|o| o.copied_text = self.base.on_chain_address.clone());
-                            }
-                        }
-                    });
+                    // Get On-chain Address section (using common component)
+                    self.base.show_onchain_address_section(ui);
                     
                     ui.add_space(10.0);
                     
-                    // On-chain Send
-                    ui.group(|ui| {
-                        ui.label("On-chain Send");
-                        ui.horizontal(|ui| {
-                            ui.label("Address:");
-                            ui.text_edit_singleline(&mut self.base.on_chain_address);
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Amount (sats):");
-                            ui.text_edit_singleline(&mut self.base.on_chain_amount);
-                        });
-                        
-                        if ui.button("Send On-chain").clicked() {
-                            self.base.send_onchain();
-                        }
-                    });
+                    // On-chain Send section (using common component)
+                    self.base.show_onchain_send_section(ui);
                     
                     ui.add_space(10.0);
                     
-                    // List Channels
-                    ui.group(|ui| {
-                        ui.heading("Channels");
-                        if ui.button("Refresh Channel List").clicked() {
-                            self.update_channel_info();
-                        }
-                        
-                        ui.text_edit_multiline(&mut self.channel_info);
-                    });
+                    // List Channels section (using common component)
+                    self.base.show_channels_section(ui, &mut self.channel_info);
                     
-                    // Channel management section
+                    // Channel management section (exchange-specific, keep as is)
                     ui.group(|ui| {
                         ui.label("Channel Management");
                         

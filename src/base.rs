@@ -334,4 +334,118 @@ impl AppState {
             }
         }
     }
+    pub fn show_invoice_section(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.label("Generate Invoice");
+            ui.horizontal(|ui| {
+                ui.label("Amount (sats):");
+                ui.text_edit_singleline(&mut self.invoice_amount);
+                if ui.button("Get Invoice").clicked() {
+                    self.generate_invoice();
+                }
+            });
+            
+            if !self.invoice_result.is_empty() {
+                ui.text_edit_multiline(&mut self.invoice_result);
+                if ui.button("Copy").clicked() {
+                    ui.output_mut(|o| o.copied_text = self.invoice_result.clone());
+                }
+            }
+        });
+    }
+    
+    pub fn show_pay_invoice_section(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.label("Pay Invoice");
+            ui.text_edit_multiline(&mut self.invoice_to_pay);
+            if ui.button("Pay Invoice").clicked() {
+                self.pay_invoice();
+            }
+        });
+    }
+    
+    pub fn show_onchain_address_section(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.label("On-chain Address");
+            if ui.button("Get Address").clicked() {
+                self.get_address();
+            }
+            
+            if !self.on_chain_address.is_empty() {
+                ui.label(self.on_chain_address.clone());
+                if ui.button("Copy").clicked() {
+                    ui.output_mut(|o| o.copied_text = self.on_chain_address.clone());
+                }
+            }
+        });
+    }
+    
+    pub fn show_onchain_send_section(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.label("On-chain Send");
+            ui.horizontal(|ui| {
+                ui.label("Address:");
+                ui.text_edit_singleline(&mut self.on_chain_address);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Amount (sats):");
+                ui.text_edit_singleline(&mut self.on_chain_amount);
+            });
+            
+            if ui.button("Send On-chain").clicked() {
+                self.send_onchain();
+            }
+        });
+    }
+    
+    pub fn show_balance_section(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.heading("Balances");
+            ui.add_space(5.0);
+            
+            // Lightning balance
+            ui.horizontal(|ui| {
+                ui.label("Lightning:");
+                ui.monospace(format!("{:.8} BTC", self.lightning_balance_btc));
+                ui.monospace(format!("(${:.2})", self.lightning_balance_usd));
+            });
+            
+            // On-chain balance
+            ui.horizontal(|ui| {
+                ui.label("On-chain:  ");
+                ui.monospace(format!("{:.8} BTC", self.onchain_balance_btc));
+                ui.monospace(format!("(${:.2})", self.onchain_balance_usd));
+            });
+            
+            // Total balance
+            ui.horizontal(|ui| {
+                ui.label("Total:     ");
+                ui.strong(format!("{:.8} BTC", self.total_balance_btc));
+                ui.strong(format!("(${:.2})", self.total_balance_usd));
+            });
+            
+            ui.add_space(5.0);
+            ui.label(format!("Price: ${:.2} | Updated: {} seconds ago", 
+                             self.btc_price,
+                             self.last_update.elapsed().as_secs()));
+        });
+    }
+    
+    pub fn show_node_info_section(&mut self, ui: &mut egui::Ui, port: u16) {
+        ui.group(|ui| {
+            ui.label(format!("Node ID: {}", self.node.node_id()));
+            ui.label(format!("Listening on: 127.0.0.1:{}", port));
+        });
+    }
+    
+    pub fn show_channels_section(&mut self, ui: &mut egui::Ui, channel_info: &mut String) {
+        ui.group(|ui| {
+            ui.heading("Channels");
+            if ui.button("Refresh Channel List").clicked() {
+                *channel_info = self.update_channel_info();
+            }
+            
+            ui.text_edit_multiline(channel_info);
+        });
+    }
 }
