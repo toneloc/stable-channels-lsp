@@ -47,6 +47,128 @@ impl ExchangeApp {
         self.channel_info = self.base.update_channel_info();
     }
 
+    // Add this function to the ExchangeApp impl
+    fn show_channels_table(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.heading("Lightning Channels");
+            
+            // Add refresh button at the top
+            if ui.button("Refresh Channel List").clicked() {
+                self.update_channel_info();
+            }
+            
+            // Get channels list
+            let channels = self.base.node.list_channels();
+            
+            // Debug info
+            ui.label(format!("Debug: Found {} channels", channels.len()));
+            if !channels.is_empty() {
+                ui.label(format!("First channel ID: {}", channels[0].channel_id));
+            }
+            
+            if channels.is_empty() {
+                ui.label("No channels found.");
+                return;
+            }
+
+            // Use egui_extras for better table rendering
+            use egui_extras::{Column, TableBuilder};
+            
+            // Calculate text height first
+            let text_height = egui::TextStyle::Body
+                .resolve(ui.style())
+                .size
+                .max(ui.spacing().interact_size.y);
+                
+            // Store current price to avoid borrow issues
+            let btc_price = self.base.btc_price;
+            
+            // Store the available height before creating the table builder
+            let available_height = ui.available_height();
+            
+            // Pre-compute the data we need to display for each channel
+            let channel_data: Vec<_> = channels.iter().enumerate().map(|(i, channel)| {
+                // Calculate values
+                let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
+                let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
+                let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+                
+                let our_btc = our_balance_sats as f64 / 100_000_000.0;
+                let their_btc = their_balance_sats as f64 / 100_000_000.0;
+                
+                let our_usd = our_btc * btc_price;
+                let their_usd = their_btc * btc_price;
+                
+                // Format channel ID
+                let channel_id = channel.channel_id.to_string();
+                let short_id = if channel_id.len() > 14 {
+                    format!("{}...{}", &channel_id[0..6], &channel_id[channel_id.len() - 6..])
+                } else {
+                    channel_id.clone()
+                };
+                
+                // Format counterparty pubkey
+                let pubkey = channel.counterparty_node_id.to_string();
+                let short_pubkey = if pubkey.len() > 8 {
+                    format!("{}...", &pubkey[0..8])
+                } else {
+                    pubkey.clone()
+                };
+                
+                (i + 1, short_id, short_pubkey, our_btc, their_btc, our_usd, their_usd)
+            }).collect();
+
+            // Debug information for the pre-computed data
+            ui.label(format!("Debug: Pre-computed {} rows of data", channel_data.len()));
+
+            ui.add_space(10.0);
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // Create the table
+                TableBuilder::new(ui)
+                    .striped(true)
+                    .resizable(true)
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .column(Column::auto().resizable(true))  // #
+                    .column(Column::auto().at_least(100.0).resizable(true))  // Channel ID
+                    .column(Column::auto().at_least(80.0).resizable(true))   // Counterparty
+                    .column(Column::auto().at_least(80.0).resizable(true))   // Our BTC
+                    .column(Column::auto().at_least(80.0).resizable(true))   // Their BTC
+                    .column(Column::auto().at_least(80.0).resizable(true))   // Our USD
+                    .column(Column::auto().at_least(80.0).resizable(true))   // Their USD
+                    .column(Column::auto().at_least(80.0).resizable(true))   // Agreed USD
+                    .min_scrolled_height(0.0)
+                    .max_scroll_height(available_height) 
+                    .header(20.0, |mut header| {
+                        header.col(|ui| { ui.strong("#"); });
+                        header.col(|ui| { ui.strong("Channel ID"); });
+                        header.col(|ui| { ui.strong("Counterparty"); });
+                        header.col(|ui| { ui.strong("Our BTC"); });
+                        header.col(|ui| { ui.strong("Their BTC"); });
+                        header.col(|ui| { ui.strong("Our USD"); });
+                        header.col(|ui| { ui.strong("Their USD"); });
+                        header.col(|ui| { ui.strong("Agreed USD"); });
+                    })
+                    .body(|mut body| {
+                        for (i, data) in channel_data.iter().enumerate() {
+                            body.row(22.0, |mut row| {
+                                row.col(|ui| { ui.label(data.0.to_string()); });
+                                row.col(|ui| { ui.label(&data.1); });
+                                row.col(|ui| { ui.label(&data.2); });
+                                row.col(|ui| { ui.label(format!("{:.8}", data.3)); });
+                                row.col(|ui| { ui.label(format!("{:.8}", data.4)); });
+                                row.col(|ui| { ui.label(format!("${:.2}", data.5)); });
+                                row.col(|ui| { ui.label(format!("${:.2}", data.6)); });
+                                row.col(|ui| { ui.label("N/A"); });
+                            });
+                        }
+                    });
+                });     
+                ui.add_space(10.0);
+
+        });
+    }
+
     fn show_exchange_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             // Add a scrollable area
@@ -119,8 +241,8 @@ impl ExchangeApp {
                     
                     ui.add_space(10.0);
                     
-                    // List Channels section (using common component)
-                    self.base.show_channels_section(ui, &mut self.channel_info);
+                    // Use the new table component instead of the old channels section
+                    self.show_channels_table(ui);
                     
                     // Channel management section (exchange-specific, keep as is)
                     ui.group(|ui| {
