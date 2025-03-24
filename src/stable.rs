@@ -3,12 +3,22 @@ use ldk_node::{
     lightning::ln::types::ChannelId, Node,
 };
 use ureq::Agent;
+use crate::price_feeds::get_cached_price;
 
-/// Get the latest BTC/USD price from available price feeds
-pub fn get_latest_price(agent: &Agent) -> f64 {
+/// Get the current BTC/USD price, preferring cached value when available
+pub fn get_current_price(agent: &Agent) -> f64 {
+    // First try the cached price
+    let cached_price = get_cached_price();
+    
+    // Use the cached price if valid
+    if cached_price > 0.0 {
+        return cached_price;
+    }
+    
+    // Fall back to fetching a new price
     match crate::price_feeds::get_latest_price(agent) {
         Ok(price) => price,
-        Err(_) => 84000.0 // TODO
+        Err(_) => 84000.0 // Fallback value
     }
 }
 
@@ -19,9 +29,15 @@ pub fn channel_exists(node: &Node, channel_id: &ChannelId) -> bool {
 }
 
 pub fn update_balances(node: &Node, mut sc: StableChannel) -> (bool, StableChannel) {
+    // Update price from cache if needed
     if sc.latest_price == 0.0 {
-        let agent = Agent::new();
-        sc.latest_price = get_latest_price(&agent);
+        sc.latest_price = get_cached_price();
+        
+        // Fall back to direct fetch if cache is empty
+        if sc.latest_price == 0.0 {
+            let agent = Agent::new();
+            sc.latest_price = get_current_price(&agent);
+        }
     }
     
     let channels = node.list_channels();
@@ -96,10 +112,16 @@ pub fn initialize_stable_channel(
     sc.expected_usd = USD::from_f64(expected_dollar_amount);
     sc.expected_btc = Bitcoin::from_btc(native_amount_sats);
     
-    // Get initial price
-    let agent = Agent::new();
-    let latest_price = get_latest_price(&agent);
-    sc.latest_price = latest_price;
+    // Get price from cache first
+    let latest_price = get_cached_price();
+    
+    // Fall back to direct fetch if cache is empty
+    if latest_price <= 0.0 {
+        let agent = Agent::new();
+        sc.latest_price = get_current_price(&agent);
+    } else {
+        sc.latest_price = latest_price;
+    }
 
     // Update balances
     let (_, updated_sc) = update_balances(node, sc);
@@ -111,8 +133,22 @@ pub fn initialize_stable_channel(
 pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
     println!("\n=== CHECKING CHANNEL STABILITY ===");
     
+    // Only use provided price if it's valid
+    let current_price = if price > 0.0 {
+        price
+    } else {
+        // Otherwise use cached price
+        let cached_price = get_cached_price();
+        if cached_price > 0.0 {
+            cached_price
+        } else {
+            println!("⚠ Skipping stability check: No valid price available");
+            return;
+        }
+    };
+    
     // Update the price in the stable channel
-    sc.latest_price = price;
+    sc.latest_price = current_price;
     
     // Get updated balances with the current price
     let (success, updated_sc) = update_balances(node, sc.clone());
@@ -179,6 +215,23 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
     }
     
     println!("=== STABILITY CHECK COMPLETE ===");
+}
+
+// For backward compatibility with other code
+pub fn check_stability_with_price(node: &Node, sc: &mut StableChannel, price: f64) {
+    // Only use provided price if it's valid
+    if price > 0.0 {
+        sc.latest_price = price;
+    } else {
+        // Otherwise use cached price
+        let cached_price = get_cached_price();
+        if cached_price > 0.0 {
+            sc.latest_price = cached_price;
+        }
+    }
+    
+    // Call the main implementation
+    check_stability(node, sc, sc.latest_price);
 }
 
 /// Helper function

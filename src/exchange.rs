@@ -3,6 +3,7 @@ use eframe::{egui, App, Frame};
 use std::time::{Duration, Instant};
 
 use crate::base::AppState;
+use crate::price_feeds::get_cached_price;
 
 // Configuration constants
 const EXCHANGE_DATA_DIR: &str = "data/exchange";
@@ -155,17 +156,20 @@ impl App for ExchangeApp {
         // Poll for LDK node events
         self.base.poll_events();
         
-        // Update balances and other info periodically
         if self.base.last_update.elapsed() > Duration::from_secs(30) {
+            let current_price = get_cached_price();
+            
+            if current_price > 0.0 {
+                self.base.btc_price = current_price;
+            }
+            
             self.base.update_balances();
             self.update_channel_info();
             self.base.last_update = Instant::now();
         }
         
-        // Show the exchange interface
         self.show_exchange_screen(ctx);
         
-        // Request a repaint frequently to keep the UI responsive
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 }

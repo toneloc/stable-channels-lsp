@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 use ureq::Agent;
 
-use crate::price_feeds::get_latest_price;
+use crate::price_feeds::get_cached_price;
 
 // Common configuration constants can stay here or move to a constants.rs
 pub const DEFAULT_NETWORK: &str = "signet";
@@ -102,9 +102,8 @@ impl AppState {
         println!("Node started with ID: {}", node.node_id());
         
         // Get initial price
-        let agent = Agent::new();
-        let btc_price = get_latest_price(&agent).unwrap_or(55000.0);
-        
+        let btc_price = get_cached_price();
+    
         let mut app_state = Self {
             node,
             btc_price,
@@ -130,6 +129,11 @@ impl AppState {
     }
     
     pub fn update_balances(&mut self) {
+        let current_price = get_cached_price();
+        if current_price > 0.0 {
+            self.btc_price = current_price;
+        }
+        
         let balances = self.node.list_balances();
         
         self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;

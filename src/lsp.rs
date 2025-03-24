@@ -14,6 +14,8 @@ use hex;
 use crate::base::AppState;
 use crate::types::*;
 use crate::stable;
+use crate::price_feeds::get_cached_price;
+
 
 // Configuration constants
 const LSP_DATA_DIR: &str = "data/lsp";
@@ -201,12 +203,21 @@ impl LspApp {
     }
     
     fn check_and_update_stable_channels(&mut self) {
+        let current_price = get_cached_price();
+
+        if current_price > 0.0 {
+            self.base.btc_price = current_price;
+        }
+        
         for sc in &mut self.stable_channels {
             if !stable::channel_exists(&self.base.node, &sc.channel_id) {
                 continue;
             }
             
-            stable::check_stability(&self.base.node, sc);
+            sc.latest_price = current_price;
+            
+            // Pass the current price to check_stability
+            stable::check_stability(&self.base.node, sc, current_price);
         }
     }
     
@@ -444,6 +455,14 @@ impl App for LspApp {
         
         // Update balances and other info periodically
         if self.base.last_update.elapsed() > Duration::from_secs(30) {
+            // Get the cached price
+            let current_price = get_cached_price();
+            
+            // Update the base price if valid
+            if current_price > 0.0 {
+                self.base.btc_price = current_price;
+            }
+            
             self.base.update_balances();
             self.base.last_update = Instant::now();
         }
