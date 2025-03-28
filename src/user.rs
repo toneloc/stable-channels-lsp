@@ -21,11 +21,11 @@ use crate::types::*;
 const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
-const DEFAULT_LSP_PUBKEY: &str = "032a43065fac39f6238ca5adf2972dab14e4b98dcce6c8333ede4733816d70090c";
+const DEFAULT_LSP_PUBKEY: &str = "028d1fe921fc54dd6a9b7d86a3f031c3d84212493f48e754b6c6d99107f339e7e5";
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const DEFAULT_LSP_AUTH: &str = "00000000000000000000000000000000";
 const EXPECTED_USD: f64 = 8.0;
-const DEFAULT_GATEWAY_PUBKEY: &str = "034e2a8f45b1ea43fb67780bf39116a8956f220a9289e5aa45309d6e47b0acc1aa";
+const DEFAULT_GATEWAY_PUBKEY: &str = "02eb14024272877a1afc404b637a87dee29cebfa1765c74677754d16dae3052c78";
 
 #[cfg(feature = "user")]
 pub struct UserApp {
@@ -149,7 +149,7 @@ impl UserApp {
         );
         
         let result = self.base.node.bolt11_payment().receive_via_jit_channel(
-            10_000_000, 
+            20_000_000, 
             &description,
             3600, // 1 hour expiry
             Some(10_000_000), // minimum channel size of 10k sats

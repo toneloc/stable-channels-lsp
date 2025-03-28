@@ -48,7 +48,7 @@ impl LspApp {
         let service_config = LSPS2ServiceConfig {
             require_token: None,
             advertise_service: true,
-            channel_opening_fee_ppm: 1_000,
+            channel_opening_fee_ppm: 0,
             channel_over_provisioning_ppm: 1_000_000,
             min_channel_opening_fee_msat: 0,
             min_channel_lifetime: 100,

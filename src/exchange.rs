@@ -26,7 +26,8 @@ impl ExchangeApp {
         let base = AppState::new(
             EXCHANGE_DATA_DIR, 
             EXCHANGE_NODE_ALIAS, 
-            EXCHANGE_PORT
+            EXCHANGE_PORT,
+            None
         );
         
         let mut app = Self {
