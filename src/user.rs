@@ -5,6 +5,7 @@ use ldk_node::{
     lightning::ln::msgs::SocketAddress,
     lightning_invoice::Bolt11Invoice,
 };
+use lightning::util::wakers::Sleeper;
 use ureq::Agent;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -46,19 +47,20 @@ impl UserApp {
         println!("Initializing user node...");
         
         // Configure LSP settings before creating base
-        let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY).ok();
+        let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY).unwrap();
         
         // Initialize the base AppState
         let mut base = AppState::new(
             USER_DATA_DIR, 
             USER_NODE_ALIAS, 
-            USER_PORT
+            USER_PORT,
+            Some((DEFAULT_LSP_ADDRESS.to_string(), lsp_pubkey))
         );
-        
+
         // Additional setup specific to the user node
-        
         // Connect to LSP if available
-        if let Some(key) = lsp_pubkey.clone() {
+        if let key = lsp_pubkey.clone() {
+            println!("here");
             if let Ok(socket_addr) = DEFAULT_LSP_ADDRESS.parse::<std::net::SocketAddr>() {
                 println!("Setting LSP with address: {} and pubkey: {}", 
                          DEFAULT_LSP_ADDRESS, key);
@@ -73,6 +75,17 @@ impl UserApp {
                 println!("Failed to connect to gateway: {}", e);
             }
         }
+
+        if let Ok(pubkey) = PublicKey::from_str(DEFAULT_LSP_ADDRESS) {
+            let socket_addr = SocketAddress::from_str("127.0.0.1:9737").unwrap(); 
+            if let Err(e) = base.node.connect(pubkey, socket_addr, true) {
+                println!("Failed to connect to lsp: {}", e);
+            }
+            else {
+                println!("Hi");
+            }
+        }
+        
         
         // Initialize price (ensure we have a valid price before proceeding)
         let current_price = crate::price_feeds::get_cached_price();
@@ -93,7 +106,7 @@ impl UserApp {
         
         let stable_channel = StableChannel {
             channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes([0u8; 32]),
-            counterparty: lsp_pubkey.unwrap_or(default_lsp_pubkey),
+            counterparty: lsp_pubkey, // user's counteparty is always the LSP
             is_stable_receiver: true,
             expected_usd: USD::from_f64(EXPECTED_USD),
             expected_btc: Bitcoin::from_usd(USD::from_f64(EXPECTED_USD), base.btc_price),
@@ -136,10 +149,10 @@ impl UserApp {
         );
         
         let result = self.base.node.bolt11_payment().receive_via_jit_channel(
-            1_000_000, 
+            10_000_000, 
             &description,
             3600, // 1 hour expiry
-            Some(1_000_000), // minimum channel size of 10k sats
+            Some(10_000_000), // minimum channel size of 10k sats
         );
     
         match result {

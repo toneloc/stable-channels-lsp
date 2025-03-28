@@ -47,7 +47,6 @@ impl ExchangeApp {
         self.channel_info = self.base.update_channel_info();
     }
 
-    // Add this function to the ExchangeApp impl
     fn show_channels_table(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.heading("Lightning Channels");

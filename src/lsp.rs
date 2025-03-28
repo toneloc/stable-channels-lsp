@@ -63,7 +63,8 @@ impl LspApp {
         let base = AppState::new(
             LSP_DATA_DIR, 
             LSP_NODE_ALIAS, 
-            LSP_PORT
+            LSP_PORT, 
+            None
         );
         
         let mut app = Self {
@@ -77,7 +78,7 @@ impl LspApp {
         
         app
     }
-     
+
     fn designate_stable_channel(&mut self) {
         if self.selected_channel_id.is_empty() {
             self.base.status_message = "Please select a channel ID".to_string();
@@ -328,7 +329,6 @@ impl LspApp {
                         
                         ui.add_space(10.0);
                         
-                        // UI for creating a new stable channel
                         ui.label("Designate Stable Channel:");
                         
                         ui.horizontal(|ui| {
@@ -341,10 +341,8 @@ impl LspApp {
                             ui.text_edit_singleline(&mut self.stable_channel_amount);
                         });
                         
-                        let button_color = egui::Color32::from_rgba_premultiplied(247, 147, 26, 200);
                         if ui.add(
                             egui::Button::new("Designate as Stable")
-                                .fill(button_color)
                                 .min_size(egui::vec2(150.0, 30.0))
                         ).clicked() {
                             self.designate_stable_channel();
