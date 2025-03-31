@@ -41,7 +41,6 @@ impl LspApp {
     fn new() -> Self {
         println!("Initializing LSP node...");
         
-        // Create a node builder
         let mut builder = Builder::new();
         
         // Configure LSPS2 service

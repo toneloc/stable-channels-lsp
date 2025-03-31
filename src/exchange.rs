@@ -1,5 +1,6 @@
 // src/exchange.rs
 use eframe::{egui, App, Frame};
+use ldk_node::Builder;
 use std::time::{Duration, Instant};
 
 use crate::base::AppState;
@@ -22,13 +23,13 @@ pub struct ExchangeApp {
 #[cfg(feature = "exchange")]
 impl ExchangeApp {
     fn new() -> Self {
-        // Initialize the base AppState
+        let mut builder = Builder::new();
+
         let base = AppState::new(
+            builder,
             EXCHANGE_DATA_DIR, 
             EXCHANGE_NODE_ALIAS, 
-            EXCHANGE_PORT,
-            None
-        );
+            EXCHANGE_PORT,        );
         
         let mut app = Self {
             base,

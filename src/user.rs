@@ -149,12 +149,14 @@ impl UserApp {
         let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
             ldk_node::lightning_invoice::Description::new("Stable Channel JIT payment".to_string()).unwrap()
         );
+
+
         
         let result = self.base.node.bolt11_payment().receive_via_jit_channel(
-            50000000, 
+            USD::to_msats(USD::from_f64(EXPECTED_USD), self.stable_channel.latest_price),
             &description,
             3600, // 1 hour expiry
-            Some(10000000), // minimum channel size of 10k sats
+            Some(10000000), 
         );
         match result {
             Ok(invoice) => {
@@ -399,20 +401,20 @@ impl UserApp {
                     self.get_jit_invoice(ctx);
                 }
 
-                let create_lsps1_button = egui::Button::new(
-                        egui::RichText::new("Stabilize via LSPS1")
-                            .color(egui::Color32::WHITE)
-                            .strong()
-                            .size(18.0),
-                    )
-                        .min_size(egui::vec2(200.0, 55.0))
-                        .fill(egui::Color32::DARK_BLUE)
-                        .rounding(8.0);
+                // let create_lsps1_button = egui::Button::new(
+                //         egui::RichText::new("Stabilize via LSPS1")
+                //             .color(egui::Color32::WHITE)
+                //             .strong()
+                //             .size(18.0),
+                //     )
+                //         .min_size(egui::vec2(200.0, 55.0))
+                //         .fill(egui::Color32::DARK_BLUE)
+                //         .rounding(8.0);
     
-                if ui.add(create_lsps1_button).clicked() {
-                    self.base.status_message = "Requesting inbound channel via LSPS1...".to_string();
-                    self.get_lsps1_channel(); 
-                }
+                // if ui.add(create_lsps1_button).clicked() {
+                //     self.base.status_message = "Requesting inbound channel via LSPS1...".to_string();
+                //     self.get_lsps1_channel(); 
+                // }
                 
                 // Show status message if there is one
                 if !self.base.status_message.is_empty() {
