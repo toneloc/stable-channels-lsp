@@ -1,5 +1,6 @@
 // src/user.rs
 use eframe::{egui, App, Frame};
+use ldk_node::Builder;
 use ldk_node::{
     bitcoin::secp256k1::PublicKey,
     lightning::ln::msgs::SocketAddress,
@@ -48,13 +49,19 @@ impl UserApp {
         
         // Configure LSP settings before creating base
         let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY).unwrap();
+
+        let mut builder = Builder::new();
+
+        println!("Setting LSP with address: {} and pubkey: {}", DEFAULT_LSP_ADDRESS, DEFAULT_LSP_PUBKEY);
+        builder.set_liquidity_source_lsps2(PublicKey::from_str(DEFAULT_LSP_PUBKEY).unwrap(), SocketAddress::from_str(DEFAULT_LSP_ADDRESS).unwrap(), None);
+        builder.set_liquidity_source_lsps1(PublicKey::from_str(DEFAULT_LSP_PUBKEY).unwrap(), SocketAddress::from_str(DEFAULT_LSP_ADDRESS).unwrap(),None);
         
         // Initialize the base AppState
         let mut base = AppState::new(
+            builder,
             USER_DATA_DIR, 
             USER_NODE_ALIAS, 
             USER_PORT,
-            Some((DEFAULT_LSP_ADDRESS.to_string(), lsp_pubkey))
         );
 
         // Additional setup specific to the user node
@@ -98,11 +105,6 @@ impl UserApp {
         } else {
             base.btc_price = current_price;
         }
-        
-        // Create an empty stable channel with default values
-        let default_lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY).unwrap_or_else(|_| {
-            panic!("Invalid LSP pubkey: {}", DEFAULT_LSP_PUBKEY);
-        });
         
         let stable_channel = StableChannel {
             channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes([0u8; 32]),
@@ -149,12 +151,11 @@ impl UserApp {
         );
         
         let result = self.base.node.bolt11_payment().receive_via_jit_channel(
-            20_000_000, 
+            50000000, 
             &description,
             3600, // 1 hour expiry
-            Some(10_000_000), // minimum channel size of 10k sats
+            Some(10000000), // minimum channel size of 10k sats
         );
-    
         match result {
             Ok(invoice) => {
                 self.base.invoice_result = invoice.to_string();
@@ -208,6 +209,33 @@ impl UserApp {
         }
     }
     
+    fn get_lsps1_channel(&mut self) {
+        let lsp_balance_sat = 10000;
+        let client_balance_sat = 10000;
+        let channel_expiry_blocks = 2016;
+        let announce_channel = false;
+    
+        // Because lsps1_liquidity() returns LSPS1Liquidity directly:
+        let lsps1_handler = self.base.node.lsps1_liquidity();
+    
+        // Now call request_channel on it:
+        match lsps1_handler.request_channel(
+            lsp_balance_sat,
+            client_balance_sat,
+            channel_expiry_blocks,
+            announce_channel
+        ) {
+            Ok(order_status) => {
+                self.base.status_message = format!(
+                    "LSPS1 channel order initiated successfully! Status: {order_status:?}"
+                );
+            }
+            Err(e) => {
+                self.base.status_message = format!("LSPS1 channel request failed: {e:?}");
+            }
+        }
+    }
+
     fn process_events(&mut self) {
         // Extends the base poll_events with user-specific event handling
         while let Some(event) = self.base.node.next_event() {
@@ -324,7 +352,7 @@ impl UserApp {
                         .color(egui::Color32::WHITE),
                 );
                 ui.label(
-                    egui::RichText::new(r#"Press the "Stabilize" button below."#)
+                    egui::RichText::new(r#"Press the \"Stabilize\" button below."#)
                         .color(egui::Color32::GRAY),
                 );
     
@@ -369,6 +397,21 @@ impl UserApp {
                 if ui.add(create_channel_button).clicked() {
                     self.base.status_message = "Getting JIT channel invoice...".to_string();
                     self.get_jit_invoice(ctx);
+                }
+
+                let create_lsps1_button = egui::Button::new(
+                        egui::RichText::new("Stabilize via LSPS1")
+                            .color(egui::Color32::WHITE)
+                            .strong()
+                            .size(18.0),
+                    )
+                        .min_size(egui::vec2(200.0, 55.0))
+                        .fill(egui::Color32::DARK_BLUE)
+                        .rounding(8.0);
+    
+                if ui.add(create_lsps1_button).clicked() {
+                    self.base.status_message = "Requesting inbound channel via LSPS1...".to_string();
+                    self.get_lsps1_channel(); 
                 }
                 
                 // Show status message if there is one

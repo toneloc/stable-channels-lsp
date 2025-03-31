@@ -40,9 +40,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(data_dir: &str, node_alias: &str, port: u16, lsp_info: Option<(String, PublicKey)>) -> Self {
-        println!("Initializing node...");
-        
+    pub fn new(
+        mut builder: Builder,
+        data_dir: &str,
+        node_alias: &str,
+        port: u16,
+    ) -> Self {
+
         // Ensure data directory exists
         let data_dir_path = PathBuf::from(data_dir);
         if !data_dir_path.exists() {
@@ -50,8 +54,6 @@ impl AppState {
                 eprintln!("Warning: Failed to create data directory: {}", e);
             });
         }
-
-        let mut builder = Builder::new();
         
         // Configure the network
         let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
@@ -63,19 +65,6 @@ impl AppState {
                 Network::Signet
             }
         };
-
-// Set up LSP if provided
-if let Some((address, lsp_pubkey)) = lsp_info {
-    // Convert address string to SocketAddress
-    if let Ok(socket_addr) = SocketAddress::from_str(&address) {
-        // If it's for a user-facing app, print a message:
-        println!("Setting LSP with address: {} and pubkey: {}", address, lsp_pubkey);
-        builder.set_liquidity_source_lsps2(lsp_pubkey, socket_addr, Some("O".to_string()));
-    } else {
-        eprintln!("Warning: Failed to parse LSP address {}", address);
-    }
-}
-
     
         println!("Setting network to: {:?}", network);
         builder.set_network(network);

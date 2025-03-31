@@ -61,10 +61,10 @@ impl LspApp {
         
         // Initialize the base AppState with our custom builder
         let base = AppState::new(
+            builder,
             LSP_DATA_DIR, 
             LSP_NODE_ALIAS, 
             LSP_PORT, 
-            None
         );
         
         let mut app = Self {
