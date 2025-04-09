@@ -6,7 +6,6 @@ use ldk_node::{
     lightning::ln::msgs::SocketAddress,
     lightning_invoice::Bolt11Invoice,
 };
-use lightning::util::wakers::Sleeper;
 use ureq::Agent;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -16,17 +15,18 @@ use egui::TextureOptions;
 
 use crate::base::AppState;
 use crate::price_feeds::get_latest_price;
+use crate::stable::update_balances;
 use crate::types::*;
 
 // Configuration constants
 const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
-const DEFAULT_LSP_PUBKEY: &str = "028d1fe921fc54dd6a9b7d86a3f031c3d84212493f48e754b6c6d99107f339e7e5";
+const DEFAULT_LSP_PUBKEY: &str = "02289a7dcb107fe975d9383ec14ff7849cee976eb723f4b1ff4a33c080617b77b4";
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const DEFAULT_LSP_AUTH: &str = "00000000000000000000000000000000";
 const EXPECTED_USD: f64 = 8.0;
-const DEFAULT_GATEWAY_PUBKEY: &str = "02eb14024272877a1afc404b637a87dee29cebfa1765c74677754d16dae3052c78";
+const DEFAULT_GATEWAY_PUBKEY: &str = "03809c504e5b078daeaa0052a1b10bd3f48f4d6547fcf7d689965de299b76988f2";
 
 #[cfg(feature = "user")]
 pub struct UserApp {
@@ -239,7 +239,6 @@ impl UserApp {
     }
 
     fn process_events(&mut self) {
-        // Extends the base poll_events with user-specific event handling
         while let Some(event) = self.base.node.next_event() {
             match event {
                 ldk_node::Event::ChannelReady { channel_id, .. } => {
@@ -250,6 +249,7 @@ impl UserApp {
                 
                 ldk_node::Event::PaymentReceived { amount_msat, .. } => {
                     self.base.status_message = format!("Received payment of {} msats", amount_msat);
+                    update_balances(&self.base.node, &mut self.stable_channel);
                 }
                 
                 ldk_node::Event::ChannelClosed { channel_id, .. } => {
@@ -274,7 +274,7 @@ impl UserApp {
 
             ui.vertical_centered(|ui| {
                 ui.heading(
-                    egui::RichText::new("Send yourself bitcoin to stabilize.")
+                    egui::RichText::new("Send yourself bitcoin to make it stable.")
                         .size(16.0)
                         .strong()
                         .color(egui::Color32::WHITE),
@@ -354,7 +354,7 @@ impl UserApp {
                         .color(egui::Color32::WHITE),
                 );
                 ui.label(
-                    egui::RichText::new(r#"Press the \"Stabilize\" button below."#)
+                    egui::RichText::new(r#"Press the \"Make stable\" button below."#)
                         .color(egui::Color32::GRAY),
                 );
     
@@ -387,7 +387,7 @@ impl UserApp {
                 // Create channel button
                 let subtle_orange = egui::Color32::from_rgba_premultiplied(247, 147, 26, 200); 
                 let create_channel_button = egui::Button::new(
-                    egui::RichText::new("Stabilize")
+                    egui::RichText::new("Make stable")
                         .color(egui::Color32::WHITE)
                         .strong()
                         .size(18.0),
@@ -441,120 +441,122 @@ impl UserApp {
     // The main screen once the user has a channel
     fn show_main_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(30.0);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(30.0);
 
-                // Display stable channel user balances
-                ui.group(|ui| {
-                    ui.add_space(20.0);
-                    ui.heading("Your Stable Balance");
+                    // Display stable channel user balances
+                    ui.group(|ui| {
+                        ui.add_space(20.0);
+                        ui.heading("Your Stable Balance");
 
-                    let stable_btc = if self.stable_channel.is_stable_receiver {
-                        self.stable_channel.stable_receiver_btc
-                    } else {
-                        self.stable_channel.stable_provider_btc
-                    };
-                    let stable_usd = if self.stable_channel.is_stable_receiver {
-                        self.stable_channel.stable_receiver_usd
-                    } else {
-                        self.stable_channel.stable_provider_usd
-                    };
+                        let stable_btc = if self.stable_channel.is_stable_receiver {
+                            self.stable_channel.stable_receiver_btc
+                        } else {
+                            self.stable_channel.stable_provider_btc
+                        };
+                        let stable_usd = if self.stable_channel.is_stable_receiver {
+                            self.stable_channel.stable_receiver_usd
+                        } else {
+                            self.stable_channel.stable_provider_usd
+                        };
 
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("{}", stable_usd))
-                                .size(36.0)
-                                .strong(),
-                        )
-                    );
-                    ui.label(format!("Agreed Peg USD: {}", self.stable_channel.expected_usd));
-                    ui.label(format!("Bitcoin: {:.8}", stable_btc));
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("{}", stable_usd))
+                                    .size(36.0)
+                                    .strong(),
+                            )
+                        );
+                        ui.label(format!("Agreed Peg USD: {}", self.stable_channel.expected_usd));
+                        ui.label(format!("Bitcoin: {:.8}", stable_btc));
+                        ui.add_space(20.0);
+                    });
+        
                     ui.add_space(20.0);
-                });
-    
-                ui.add_space(20.0);
-    
-                // Display the fetched BTC price
-                ui.group(|ui| {
-                    ui.add_space(20.0);
-                    ui.heading("Bitcoin Price");
-                    ui.label(format!("${:.2}", self.base.btc_price));
-                    ui.add_space(20.0);
-    
-                    let last_updated = self.base.last_update.elapsed().as_secs();
-                    ui.add_space(5.0);
-                    ui.label(
-                        egui::RichText::new(format!("Last updated: {}s ago", last_updated))
-                            .size(12.0)
-                            .color(egui::Color32::GRAY),
-                    );
-                });    
-                
-                ui.add_space(20.0);
-                
-                // Show channels
-                ui.group(|ui| {
-                    ui.heading("Lightning Channels");
-                    ui.add_space(5.0);
+        
+                    // Display the fetched BTC price
+                    ui.group(|ui| {
+                        ui.add_space(20.0);
+                        ui.heading("Bitcoin Price");
+                        ui.label(format!("${:.2}", self.base.btc_price));
+                        ui.add_space(20.0);
+        
+                        let last_updated = self.base.last_update.elapsed().as_secs();
+                        ui.add_space(5.0);
+                        ui.label(
+                            egui::RichText::new(format!("Last updated: {}s ago", last_updated))
+                                .size(12.0)
+                                .color(egui::Color32::GRAY),
+                        );
+                    });    
                     
-                    let channels = self.base.node.list_channels();
-                    if channels.is_empty() {
-                        ui.label("No channels found.");
-                    } else {
-                        for channel in channels {
-                            ui.label(format!(
-                                "Channel: {} - {} sats", 
-                                channel.channel_id, 
-                                channel.channel_value_sats
-                            ));
-                        }
-                    }
-                });
-                
-                ui.add_space(20.0);
-                
-                // Status message
-                if !self.base.status_message.is_empty() {
-                    ui.label(self.base.status_message.clone());
-                    ui.add_space(10.0);
-                }
-
-                // Simple invoice generator UI
-                ui.group(|ui| {
-                    ui.label("Generate Invoice");
-                    ui.horizontal(|ui| {
-                        ui.label("Amount (sats):");
-                        ui.text_edit_singleline(&mut self.base.invoice_amount);
-                        if ui.button("Get Invoice").clicked() {
-                            self.base.generate_invoice();
+                    ui.add_space(20.0);
+                    
+                    // Show channels
+                    ui.group(|ui| {
+                        ui.heading("Lightning Channels");
+                        ui.add_space(5.0);
+                        
+                        let channels = self.base.node.list_channels();
+                        if channels.is_empty() {
+                            ui.label("No channels found.");
+                        } else {
+                            for channel in channels {
+                                ui.label(format!(
+                                    "Channel: {} - {} sats", 
+                                    channel.channel_id, 
+                                    channel.channel_value_sats
+                                ));
+                            }
                         }
                     });
                     
-                    if !self.base.invoice_result.is_empty() {
-                        ui.text_edit_multiline(&mut self.base.invoice_result);
-                        if ui.button("Copy").clicked() {
-                            ui.output_mut(|o| o.copied_text = self.base.invoice_result.clone());
-                        }
+                    ui.add_space(20.0);
+                    
+                    // Status message
+                    if !self.base.status_message.is_empty() {
+                        ui.label(self.base.status_message.clone());
+                        ui.add_space(10.0);
                     }
-                });
 
-                // Pay Invoice
-                ui.group(|ui| {
-                    ui.label("Pay Invoice");
-                    ui.text_edit_multiline(&mut self.base.invoice_to_pay);
-                    if ui.button("Pay Invoice").clicked() {
-                        self.base.pay_invoice();
+                    // Simple invoice generator UI
+                    ui.group(|ui| {
+                        ui.label("Generate Invoice");
+                        ui.horizontal(|ui| {
+                            ui.label("Amount (sats):");
+                            ui.text_edit_singleline(&mut self.base.invoice_amount);
+                            if ui.button("Get Invoice").clicked() {
+                                self.base.generate_invoice();
+                            }
+                        });
+                        
+                        if !self.base.invoice_result.is_empty() {
+                            ui.text_edit_multiline(&mut self.base.invoice_result);
+                            if ui.button("Copy").clicked() {
+                                ui.output_mut(|o| o.copied_text = self.base.invoice_result.clone());
+                            }
+                        }
+                    });
+
+                    // Pay Invoice
+                    ui.group(|ui| {
+                        ui.label("Pay Invoice");
+                        ui.text_edit_multiline(&mut self.base.invoice_to_pay);
+                        if ui.button("Pay Invoice").clicked() {
+                            self.base.pay_invoice();
+                        }
+                    });
+                    
+                    // Action buttons
+                    if ui.button("Create New Channel").clicked() {
+                        self.show_onboarding = true;
+                    }
+                    
+                    if ui.button("Get On-chain Address").clicked() {
+                        self.base.get_address();
                     }
                 });
-                
-                // Action buttons
-                if ui.button("Create New Channel").clicked() {
-                    self.show_onboarding = true;
-                }
-                
-                if ui.button("Get On-chain Address").clicked() {
-                    self.base.get_address();
-                }
             });
         });
     }
@@ -563,28 +565,21 @@ impl UserApp {
 #[cfg(feature = "user")]
 impl App for UserApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        // Process events
         self.process_events();
         
         if self.last_stability_check.elapsed() > Duration::from_secs(30) {
-            // Get the current cached price (this will trigger an update if needed)
             let current_price = crate::price_feeds::get_cached_price();
             
-            // Skip stability check if we don't have a valid price yet
             if current_price > 0.0 {
-                // Update the app's price
                 self.base.btc_price = current_price;
                 
-                // Run stability check with the current price
                 crate::stable::check_stability(&self.base.node, &mut self.stable_channel, current_price);
             } else {
                 println!("Skipping stability check: No valid price available");
             }
             
-            // Always update this timestamp
             self.last_stability_check = Instant::now();
             
-            // Update the last update timestamp if we got a valid price
             if current_price > 0.0 {
                 self.base.last_update = Instant::now();
             }

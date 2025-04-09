@@ -28,7 +28,10 @@ pub fn channel_exists(node: &Node, channel_id: &ChannelId) -> bool {
     channels.iter().any(|c| c.channel_id == *channel_id)
 }
 
-pub fn update_balances(node: &Node, mut sc: StableChannel) -> (bool, StableChannel) {
+pub fn update_balances<'update_balance_lifetime>(
+    node: &Node,
+    sc: &'update_balance_lifetime mut StableChannel,
+) -> (bool, &'update_balance_lifetime mut StableChannel) {
     // Update price from cache if needed
     if sc.latest_price == 0.0 {
         sc.latest_price = get_cached_price();
@@ -72,61 +75,7 @@ pub fn update_balances(node: &Node, mut sc: StableChannel) -> (bool, StableChann
     }
     
     println!("No matching channel found for ID: {}", sc.channel_id);
-    (false, sc)
-}
-
-/// Initialize a stable channel with the given parameters
-pub fn initialize_stable_channel(
-    node: &Node,
-    mut sc: StableChannel,
-    channel_id_str: &str,
-    is_stable_receiver: bool,
-    expected_dollar_amount: f64,
-    native_amount_sats: f64,
-) -> Result<StableChannel, Box<dyn std::error::Error>> {
-    // Check if the channel_id is provided as hex string or full channel id
-    let channel_id = if channel_id_str.len() == 64 { // It's a hex string
-        let channel_id_bytes: [u8; 32] = hex::decode(channel_id_str)?
-            .try_into()
-            .map_err(|_| "Decoded channel ID has incorrect length")?;
-        ChannelId::from_bytes(channel_id_bytes)
-    } else { // It's already a formatted channel id
-        from_str_channel_id(channel_id_str)?
-    };
-
-    // Find the counterparty node ID from the channel list
-    let mut counterparty = None;
-    for channel in node.list_channels() {
-        if channel.channel_id.to_string() == channel_id.to_string() {
-            counterparty = Some(channel.counterparty_node_id);
-            break;
-        }
-    }
-
-    let counterparty = counterparty.ok_or("Failed to find channel with the specified ID")?;
-
-    // Update the stable channel state
-    sc.channel_id = channel_id;
-    sc.is_stable_receiver = is_stable_receiver;
-    sc.counterparty = counterparty;
-    sc.expected_usd = USD::from_f64(expected_dollar_amount);
-    sc.expected_btc = Bitcoin::from_btc(native_amount_sats);
-    
-    // Get price from cache first
-    let latest_price = get_cached_price();
-    
-    // Fall back to direct fetch if cache is empty
-    if latest_price <= 0.0 {
-        let agent = Agent::new();
-        sc.latest_price = get_current_price(&agent);
-    } else {
-        sc.latest_price = latest_price;
-    }
-
-    // Update balances
-    let (_, updated_sc) = update_balances(node, sc);
-
-    Ok(updated_sc)
+    (true, sc)
 }
 
 /// Check stability, do appropriate payment or accounting
@@ -151,10 +100,9 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
     sc.latest_price = current_price;
     
     // Get updated balances with the current price
-    let (success, updated_sc) = update_balances(node, sc.clone());
+    let (success, updated_sc) = update_balances(node, sc);
     
-    if success { 
-        *sc = updated_sc;
+    if success {
         println!("✓ Channel balances updated successfully");
     } else {
         println!("⚠ Failed to update channel balances");
