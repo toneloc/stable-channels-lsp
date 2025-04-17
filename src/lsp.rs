@@ -421,7 +421,7 @@ impl App for LspApp {
         }
         
         // Check stability of stable channels periodically
-        if self.last_stability_check.elapsed() > Duration::from_secs(10) {
+        if self.last_stability_check.elapsed() > Duration::from_secs(30) {
             self.check_and_update_stable_channels();
             self.last_stability_check = Instant::now();
         }

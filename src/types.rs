@@ -183,7 +183,8 @@ pub struct StableChannel {
     pub payment_made: bool,
     pub sc_dir: String,
     pub latest_price: f64,
-    pub prices: String
+    pub prices: String,
+    
 }
 
 // Implement manual Default for StableChannel

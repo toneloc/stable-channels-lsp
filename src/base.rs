@@ -2,14 +2,14 @@
 use ldk_node::{
     bitcoin::{Network, Address, secp256k1::PublicKey},
     lightning_invoice::Bolt11Invoice,
-    lightning::ln::{msgs::SocketAddress, types::ChannelId},
+    lightning::ln::msgs::SocketAddress,
     config::ChannelConfig,
     Builder, Node, Event
 };
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::{Duration, Instant};
-use ureq::Agent;
+use std::time::Instant;
+use std::sync::Arc;
 
 use crate::price_feeds::get_cached_price;
 
@@ -18,7 +18,7 @@ pub const DEFAULT_NETWORK: &str = "signet";
 pub const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 
 pub struct AppState {
-    pub node: Node,
+    pub node: Arc<Node>,
     pub btc_price: f64,
     pub status_message: String,
     pub last_update: Instant,
@@ -77,26 +77,20 @@ impl AppState {
         println!("Setting storage directory: {}", data_dir);
         builder.set_storage_dir_path(data_dir.to_string());
         
-        // Set up listening address
         let listen_addr = format!("127.0.0.1:{}", port).parse().unwrap();
         println!("Setting listening address: {}", listen_addr);
         builder.set_listening_addresses(vec![listen_addr]).unwrap();
         
-        // Set node alias
-        builder.set_node_alias(node_alias.to_string());
+        let _ = builder.set_node_alias(node_alias.to_string());
         
-        // Build the node
-        let node = match builder.build() {
+        let node = Arc::new(match builder.build() {
             Ok(node) => {
                 println!("Node built successfully");
                 node
-            },
-            Err(e) => {
-                panic!("Failed to build node: {:?}", e);
             }
-        };
+            Err(e) => panic!("Failed to build node: {:?}", e),
+        });
         
-        // Start the node
         if let Err(e) = node.start() {
             panic!("Failed to start node: {:?}", e);
         }

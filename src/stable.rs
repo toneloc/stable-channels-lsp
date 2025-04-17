@@ -18,7 +18,7 @@ pub fn get_current_price(agent: &Agent) -> f64 {
     // Fall back to fetching a new price
     match crate::price_feeds::get_latest_price(agent) {
         Ok(price) => price,
-        Err(_) => 84000.0 // Fallback value
+        Err(_) => 0.0 
     }
 }
 
@@ -98,7 +98,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
     
     // Update the price in the stable channel
     sc.latest_price = current_price;
-    
+
     // Get updated balances with the current price
     let (success, updated_sc) = update_balances(node, sc);
     
@@ -132,7 +132,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
         return;
     } else if (sc.is_stable_receiver && is_receiver_below_expected) || 
               (!sc.is_stable_receiver && !is_receiver_below_expected) {
-        println!("\n⏱ WAITING: Balance conditions indicate we should wait for payment from counterparty.");
+        println!("\n⏱ CHECKING: Balance conditions indicate we should check for payment from counterparty.");
         if sc.is_stable_receiver {
             println!("  We are the stable receiver and our balance is below expected.");
         } else {
