@@ -8,7 +8,7 @@ use ldk_node::{
 use ureq::Agent;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use image::{GrayImage, Luma};
 use qrcode::{QrCode, Color};
 use egui::TextureOptions;
@@ -21,7 +21,7 @@ const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
 const DEFAULT_LSP_PUBKEY: &str =
-    "02289a7dcb107fe975d9383ec14ff7849cee976eb723f4b1ff4a33c080617b77b4";
+    "03a5c6f02793e28c6fbf9af2ee67115ceefbc18f85a12fe3477a6ada65023a5417";
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const EXPECTED_USD: f64 = 8.0;
 const DEFAULT_GATEWAY_PUBKEY: &str =
@@ -117,15 +117,24 @@ impl UserApp {
             let current_price = app.base.btc_price;
             let mut sc = app.stable_channel.lock().unwrap();
             crate::stable::check_stability(&app.base.node, &mut sc, current_price);
+            update_balances(&app.base.node, &mut sc);
         }
 
         let node_arc = Arc::clone(&app.base.node);
         let sc_arc = Arc::clone(&app.stable_channel);
+
         std::thread::spawn(move || {
-            use std::{thread::sleep, time::{Duration, Instant}};
+            use std::{thread::sleep, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+        
+            fn current_unix_time() -> i64 {
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs().try_into().unwrap()
+            }
+        
             let mut last = Instant::now();
+        
             loop {
                 sleep(Duration::from_secs(1));
+        
                 if last.elapsed() >= Duration::from_secs(30)
                     && !node_arc.list_channels().is_empty()
                 {
@@ -133,7 +142,11 @@ impl UserApp {
                     if price > 0.0 {
                         let mut sc = sc_arc.lock().unwrap();
                         crate::stable::check_stability(&*node_arc, &mut sc, price);
+                        update_balances(&*node_arc, &mut sc);
+                        sc.latest_price = price;
+                        sc.timestamp = current_unix_time();
                     }
+        
                     last = Instant::now();
                 }
             }
@@ -160,6 +173,7 @@ impl UserApp {
                     if price > 0.0 {
                         let mut sc = sc_arc.lock().unwrap();
                         crate::stable::check_stability(&*node_arc, &mut sc, price);
+                        update_balances(&*node_arc, &mut sc);
                     }
                     last = Instant::now();
                 }
@@ -258,13 +272,13 @@ impl UserApp {
                         format!("Channel {channel_id} is now ready");
                     self.show_onboarding = false;
                     self.waiting_for_payment = false;
-                    self.start_background_if_needed();
                 }
                 ldk_node::Event::PaymentReceived { amount_msat, .. } => {
-                    self.base.status_message =
-                        format!("Received payment of {amount_msat} msats");
+                    self.base.status_message = format!("Received payment of {} msats", amount_msat);
                     let mut sc = self.stable_channel.lock().unwrap();
                     update_balances(&self.base.node, &mut sc);
+                    self.show_onboarding = false;
+                    self.waiting_for_payment = false;
                 }
                 ldk_node::Event::ChannelClosed { channel_id, .. } => {
                     self.base.status_message =
@@ -450,12 +464,15 @@ impl UserApp {
                     });
                     ui.add_space(20.0);
                     ui.group(|ui| {
+                        let sc = self.stable_channel.lock().unwrap();
                         ui.add_space(20.0);
                         ui.heading("Bitcoin Price");
-                        ui.label(format!("${:.2}", self.base.btc_price));
+                        ui.label(format!("${:.2}", sc.latest_price));
                         ui.add_space(20.0);
-                        let last_updated = self.base.last_update.elapsed().as_secs();
-                        ui.add_space(5.0);
+                        let last_updated = match SystemTime::now().duration_since(UNIX_EPOCH + std::time::Duration::from_secs(sc.timestamp as u64)) {
+                            Ok(duration) => duration.as_secs(),
+                            Err(_) => 0,
+                        };                        ui.add_space(5.0);
                         ui.label(
                             egui::RichText::new(format!(
                                 "Last updated: {}s ago",
@@ -527,6 +544,7 @@ impl UserApp {
 impl App for UserApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         self.process_events();
+        self.start_background_if_needed();
         if self.waiting_for_payment {
             self.show_waiting_for_payment_screen(ctx);
         } else if self.show_onboarding {
