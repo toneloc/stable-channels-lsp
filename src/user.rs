@@ -280,6 +280,11 @@ impl UserApp {
                     self.show_onboarding = false;
                     self.waiting_for_payment = false;
                 }
+                ldk_node::Event::PaymentSuccessful { payment_id, payment_hash, payment_preimage, fee_paid_msat } => {
+                    self.base.status_message = format!("Sent payment {}", payment_hash);
+                    let mut sc = self.stable_channel.lock().unwrap();
+                    update_balances(&self.base.node, &mut sc);
+                }
                 ldk_node::Event::ChannelClosed { channel_id, .. } => {
                     self.base.status_message =
                         format!("Channel {channel_id} has been closed");

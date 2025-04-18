@@ -150,6 +150,12 @@ impl AppState {
                     self.status_message = format!("Channel {} is now ready", channel_id);
                     self.update_balances();
                 }
+
+                ldk_node::Event::PaymentSuccessful { payment_id, payment_hash, payment_preimage, fee_paid_msat } => {
+                    self.status_message = format!("Sent payment {}", payment_hash);
+                    self.update_balances();
+
+                }
                 
                 Event::PaymentReceived { amount_msat, .. } => {
                     self.status_message = format!("Received payment of {} msats", amount_msat);
