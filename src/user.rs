@@ -21,7 +21,7 @@ const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
 const DEFAULT_LSP_PUBKEY: &str =
-    "03a5c6f02793e28c6fbf9af2ee67115ceefbc18f85a12fe3477a6ada65023a5417";
+    "036f452075412c2d4c12864200ef8a75341c2b4e7d19a5ed55835fe5a46a10e5ae";
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const EXPECTED_USD: f64 = 8.0;
 const DEFAULT_GATEWAY_PUBKEY: &str =
