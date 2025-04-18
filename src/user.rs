@@ -6,6 +6,7 @@ use ldk_node::{
     lightning::ln::msgs::SocketAddress,
 };
 use ureq::Agent;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,7 +16,7 @@ use egui::TextureOptions;
 
 use crate::base::AppState;
 use crate::stable::update_balances;
-use crate::types::*;
+use crate::{types::*, user};
 
 const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
@@ -44,6 +45,30 @@ impl UserApp {
     fn new() -> Self {
         println!("Initializing user node...");
 
+        #[cfg(feature = "bundled")]
+        fn get_app_data_dir(component: &str) -> PathBuf {
+            let mut path = dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("./data"))
+                .join("com.stablechannels");
+
+            if !component.is_empty() {
+                path = path.join(component);
+            }
+
+            std::fs::create_dir_all(&path).unwrap_or_else(|e| {
+                eprintln!("Warning: Failed to create data directory: {}", e);
+            });
+
+            path
+        }
+
+        let user_data_dir = get_app_data_dir("user");
+
+        #[cfg(not(feature = "bundled"))]
+        fn get_app_data_dir(component: &str) -> PathBuf {
+            PathBuf::from("./data").join(component)
+        }
+
         let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY).unwrap();
 
         let mut builder = Builder::new();
@@ -62,7 +87,9 @@ impl UserApp {
             None,
         );
 
-        let mut base = AppState::new(builder, USER_DATA_DIR, USER_NODE_ALIAS, USER_PORT);
+        let _user_data_dir = get_app_data_dir("user").to_string_lossy().to_string();let user_data_dir = get_app_data_dir("user").to_string_lossy().to_string();
+        
+        let mut base = AppState::new(builder, &user_data_dir, USER_NODE_ALIAS, USER_PORT);
 
         if let Ok(pubkey) = PublicKey::from_str(DEFAULT_GATEWAY_PUBKEY) {
             let socket_addr = SocketAddress::from_str("127.0.0.1:9735").unwrap();
@@ -155,6 +182,23 @@ impl UserApp {
         app
     }
 
+    fn get_app_data_dir(component: &str) -> PathBuf {
+        let mut path = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("./data"))
+            .join("com.stablechannels");
+        
+        if !component.is_empty() {
+            path = path.join(component);
+        }
+        
+        // Ensure the directory exists
+        std::fs::create_dir_all(&path).unwrap_or_else(|e| {
+            eprintln!("Warning: Failed to create data directory: {}", e);
+        });
+        
+        path
+    }
+    
     fn start_background_if_needed(&mut self) {
         if self.background_started {
             return;
