@@ -143,6 +143,7 @@ impl AppState {
         self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
     }
     
+    // polls LDK events
     pub fn poll_events(&mut self) {
         while let Some(event) = self.node.next_event() {
             match event {
@@ -151,10 +152,14 @@ impl AppState {
                     self.update_balances();
                 }
 
-                ldk_node::Event::PaymentSuccessful { payment_id, payment_hash, payment_preimage, fee_paid_msat } => {
+                ldk_node::Event::PaymentSuccessful {
+                    payment_id: _,
+                    payment_hash,
+                    payment_preimage: _,
+                    fee_paid_msat: _,
+                } => {
                     self.status_message = format!("Sent payment {}", payment_hash);
                     self.update_balances();
-
                 }
                 
                 Event::PaymentReceived { amount_msat, .. } => {
@@ -167,9 +172,9 @@ impl AppState {
                     self.update_balances();
                 }
                 
-                _ => {} // Ignore other events for now
+                _ => {} // Ignore other events 
             }
-            self.node.event_handled(); // Mark event as handled
+            let _ = self.node.event_handled();
         }
     }
     

@@ -28,15 +28,14 @@ pub fn channel_exists(node: &Node, channel_id: &ChannelId) -> bool {
     channels.iter().any(|c| c.channel_id == *channel_id)
 }
 
+// Can run in backgound
 pub fn update_balances<'update_balance_lifetime>(
     node: &Node,
     sc: &'update_balance_lifetime mut StableChannel,
 ) -> (bool, &'update_balance_lifetime mut StableChannel) {
-    // Update price from cache if needed
     if sc.latest_price == 0.0 {
         sc.latest_price = get_cached_price();
         
-        // Fall back to direct fetch if cache is empty
         if sc.latest_price == 0.0 {
             let agent = Agent::new();
             sc.latest_price = get_current_price(&agent);
@@ -78,11 +77,9 @@ pub fn update_balances<'update_balance_lifetime>(
     (true, sc)
 }
 
-/// Check stability, do appropriate payment or accounting
 pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
     println!("\n=== CHECKING CHANNEL STABILITY ===");
     
-    // Only use provided price if it's valid
     let current_price = if price > 0.0 {
         price
     } else {
@@ -91,7 +88,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
         if cached_price > 0.0 {
             cached_price
         } else {
-            println!("⚠ Skipping stability check: No valid price available");
+            println!("Skipping stability check: No valid price available");
             return;
         }
     };
@@ -100,12 +97,12 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
     sc.latest_price = current_price;
 
     // Get updated balances with the current price
-    let (success, updated_sc) = update_balances(node, sc);
+    let (success, _) = update_balances(node, sc);
     
     if success {
-        println!("✓ Channel balances updated successfully");
+        println!("Channel balances updated successfully");
     } else {
-        println!("⚠ Failed to update channel balances");
+        println!("Failed to update channel balances");
     }
     
     // Calculate stability

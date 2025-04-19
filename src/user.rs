@@ -9,24 +9,22 @@ use ureq::Agent;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use image::{GrayImage, Luma};
 use qrcode::{QrCode, Color};
 use egui::TextureOptions;
 
 use crate::base::AppState;
 use crate::stable::update_balances;
-use crate::{types::*, user};
+use crate::types::*;
 
 const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
-const DEFAULT_LSP_PUBKEY: &str =
-    "036f452075412c2d4c12864200ef8a75341c2b4e7d19a5ed55835fe5a46a10e5ae";
+const DEFAULT_LSP_PUBKEY: &str = "036f452075412c2d4c12864200ef8a75341c2b4e7d19a5ed55835fe5a46a10e5ae";
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const EXPECTED_USD: f64 = 8.0;
-const DEFAULT_GATEWAY_PUBKEY: &str =
-    "03809c504e5b078daeaa0052a1b10bd3f48f4d6547fcf7d689965de299b76988f2";
+const DEFAULT_GATEWAY_PUBKEY: &str = "03809c504e5b078daeaa0052a1b10bd3f48f4d6547fcf7d689965de299b76988f2";
 
 #[cfg(feature = "user")]
 pub struct UserApp {
@@ -35,8 +33,6 @@ pub struct UserApp {
     qr_texture: Option<egui::TextureHandle>,
     waiting_for_payment: bool,
     stable_channel: Arc<Mutex<StableChannel>>,
-    is_stable_channel_initialized: bool,
-    last_stability_check: Instant,
     background_started: bool,
 }
 
@@ -129,14 +125,12 @@ impl UserApp {
 
         let show_onboarding = base.node.list_channels().is_empty();
 
-        let mut app = Self {
+        let app = Self {
             base,
             show_onboarding,
             qr_texture: None,
             waiting_for_payment: false,
             stable_channel,
-            is_stable_channel_initialized: true,
-            last_stability_check: Instant::now(),
             background_started: false,
         };
 
@@ -182,22 +176,22 @@ impl UserApp {
         app
     }
 
-    fn get_app_data_dir(component: &str) -> PathBuf {
-        let mut path = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("./data"))
-            .join("com.stablechannels");
+    // fn get_app_data_dir(component: &str) -> PathBuf {
+    //     let mut path = dirs::data_local_dir()
+    //         .unwrap_or_else(|| PathBuf::from("./data"))
+    //         .join("com.stablechannels");
         
-        if !component.is_empty() {
-            path = path.join(component);
-        }
+    //     if !component.is_empty() {
+    //         path = path.join(component);
+    //     }
         
-        // Ensure the directory exists
-        std::fs::create_dir_all(&path).unwrap_or_else(|e| {
-            eprintln!("Warning: Failed to create data directory: {}", e);
-        });
+    //     // Ensure the directory exists
+    //     std::fs::create_dir_all(&path).unwrap_or_else(|e| {
+    //         eprintln!("Warning: Failed to create data directory: {}", e);
+    //     });
         
-        path
-    }
+    //     path
+    // }
     
     fn start_background_if_needed(&mut self) {
         if self.background_started {
@@ -205,6 +199,8 @@ impl UserApp {
         }
         let node_arc = Arc::clone(&self.base.node);
         let sc_arc = Arc::clone(&self.stable_channel);
+
+        // This runs in background every 30 seconds
         std::thread::spawn(move || {
             use std::{thread::sleep, time::{Duration, Instant}};
             let mut last = Instant::now();
