@@ -1,6 +1,6 @@
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::types::ChannelId;
-use std::ops::{Div, Sub};
+use std::{ops::{Div, Sub}, time::{SystemTime, UNIX_EPOCH}};
 use serde::{Deserialize, Serialize};
 
 // Custom serialization for ChannelId
@@ -209,7 +209,7 @@ impl Default for StableChannel {
             stable_receiver_usd: USD(0.0),
             stable_provider_usd: USD(0.0),
             risk_level: 0,
-            timestamp: 0,
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
             formatted_datetime: "".to_string(),
             payment_made: false,
             sc_dir: ".data".to_string(),

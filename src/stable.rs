@@ -178,32 +178,3 @@ pub fn check_stability_with_price(node: &Node, sc: &mut StableChannel, price: f6
     // Call the main implementation
     check_stability(node, sc, sc.latest_price);
 }
-
-/// Helper function
-fn from_str_channel_id(s: &str) -> Result<ChannelId, Box<dyn std::error::Error>> {
-    // Simplified parsing - may need to be expanded based on the actual string format
-    let clean_str = s.trim();
-    
-    if clean_str.len() >= 64 {
-        // It's likely a hex string
-        let hex_part = if clean_str.len() > 64 {
-            // Extract just the 64 hex chars if there's extra formatting
-            let start = clean_str.find(|c: char| c.is_ascii_hexdigit())
-                .ok_or("No hex digits found in channel ID string")?;
-            &clean_str[start..(start+64)]
-        } else {
-            clean_str
-        };
-        
-        let bytes = hex::decode(hex_part)?;
-        if bytes.len() != 32 {
-            return Err(format!("Expected 32 bytes, got {}", bytes.len()).into());
-        }
-        
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Ok(ChannelId::from_bytes(arr))
-    } else {
-        Err("Channel ID string is too short".into())
-    }
-}
