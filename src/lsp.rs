@@ -7,7 +7,6 @@ use ldk_node::{
     config::ChannelConfig,
     Builder, Node, liquidity::LSPS2ServiceConfig
 };
-use std::str::FromStr;
 use std::time::{Duration, Instant};
 use hex;
 
@@ -15,13 +14,24 @@ use crate::base::AppState;
 use crate::types::*;
 use crate::stable;
 use crate::price_feeds::get_cached_price;
-
+use serde::{Serialize, Deserialize};
+use std::fs;
+use std::path::Path;
 
 // Configuration constants
 const LSP_DATA_DIR: &str = "data/lsp";
 const LSP_NODE_ALIAS: &str = "lsp";
 const LSP_PORT: u16 = 9737;
 const EXPECTED_USD: f64 = 15.0;  // Default expected USD value for stable channels
+
+// We use this to store multiple Stable Channels for the lsp
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct StableChannelEntry {
+    channel_id: String,
+    expected_usd: f64,
+    native_btc: f64,
+}
+
 
 #[cfg(feature = "lsp")]
 pub struct LspApp {
@@ -74,6 +84,8 @@ impl LspApp {
             stable_channel_amount: EXPECTED_USD.to_string(),
             last_stability_check: Instant::now(),
         };
+
+        app.load_stable_channels();
         
         app
     }
@@ -97,7 +109,7 @@ impl LspApp {
         for channel in self.base.node.list_channels() {
             let channel_id_string = channel.channel_id.to_string();
             
-            if channel_id_string.contains(channel_id_str) {
+            if channel_id_string == channel_id_str {
                 let expected_usd = USD::from_f64(amount);
                 let expected_btc = Bitcoin::from_usd(expected_usd, self.base.btc_price);
                 
@@ -143,6 +155,8 @@ impl LspApp {
                     self.stable_channels.push(stable_channel);
                 }
                 
+                self.save_stable_channels();
+                
                 self.base.status_message = format!(
                     "Channel {} designated as stable with target amount of ${}",
                     channel_id_string, amount
@@ -157,13 +171,15 @@ impl LspApp {
         
         self.base.status_message = format!("No channel found matching: {}", self.selected_channel_id);
     }
-    
+
     fn check_and_update_stable_channels(&mut self) {
         let current_price = get_cached_price();
 
         if current_price > 0.0 {
             self.base.btc_price = current_price;
         }
+        
+        let mut channels_updated = false;
         
         for sc in &mut self.stable_channels {
             if !stable::channel_exists(&self.base.node, &sc.channel_id) {
@@ -174,9 +190,19 @@ impl LspApp {
             
             // Pass the current price to check_stability
             stable::check_stability(&self.base.node, sc, current_price);
+            
+            // Check if we need to update the file after changes
+            if sc.payment_made {
+                channels_updated = true;
+            }
+        }
+        
+        // Save if any channel was updated
+        if channels_updated {
+            self.save_stable_channels();
         }
     }
-    
+
     fn update_channel_info(&mut self) -> String {
         let channels = self.base.node.list_channels();
         if channels.is_empty() {
@@ -247,12 +273,10 @@ impl LspApp {
                 }
             }
         } else {
-            // Try to find a channel with ID that contains the provided string
-            // This allows for partial matching with formatted channel IDs
             let mut found = false;
             for channel in self.base.node.list_channels().iter() {
                 let channel_id_string = channel.channel_id.to_string();
-                if channel_id_string.contains(channel_id_str) {
+                if channel_id_string == channel_id_str {
                     found = true;
                     let user_channel_id = channel.user_channel_id.clone();
                     let counterparty_node_id = channel.counterparty_node_id;
@@ -397,6 +421,112 @@ impl LspApp {
                 });
             });
         });
+    }
+
+    fn save_stable_channels(&mut self) {
+        let entries: Vec<StableChannelEntry> = self.stable_channels.iter().map(|sc| StableChannelEntry {
+            channel_id: sc.channel_id.to_string(),
+            expected_usd: sc.expected_usd.0,
+            native_btc: 0.0, // Hardcoded to zero for now
+        }).collect();
+
+        let file_path = Path::new(LSP_DATA_DIR).join("stablechannels.json");
+        
+        // Ensure the directory exists
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|e| {
+                eprintln!("Failed to create directory: {}", e);
+            });
+        }
+
+        match serde_json::to_string_pretty(&entries) {
+            Ok(json) => {
+                match fs::write(&file_path, json) {
+                    Ok(_) => {
+                        println!("Saved stable channels to {}", file_path.display());
+                        self.base.status_message = "Stable channels saved successfully".to_string();
+                    },
+                    Err(e) => {
+                        eprintln!("Error writing stable channels file: {}", e);
+                        self.base.status_message = format!("Failed to save stable channels: {}", e);
+                    }
+                }
+            },
+            Err(e) => {
+                eprintln!("Error serializing stable channels: {}", e);
+                self.base.status_message = format!("Failed to serialize stable channels: {}", e);
+            }
+        }
+    }
+
+    fn load_stable_channels(&mut self) {
+        let file_path = Path::new(LSP_DATA_DIR).join("stablechannels.json");
+        
+        if !file_path.exists() {
+            println!("No existing stable channels file found.");
+            return;
+        }
+
+        match fs::read_to_string(&file_path) {
+            Ok(contents) => {
+                match serde_json::from_str::<Vec<StableChannelEntry>>(&contents) {
+                    Ok(entries) => {
+                        // Clear existing stable channels
+                        self.stable_channels.clear();
+
+                        for entry in entries {
+                            // Try to find the corresponding channel
+                            for channel in self.base.node.list_channels() {
+                                if channel.channel_id.to_string() == entry.channel_id {
+                                    let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
+                                    let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
+                                    let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+                                    
+                                    let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
+                                    let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
+                                    
+                                    let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.base.btc_price);
+                                    let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.base.btc_price);
+                                    
+                                    let stable_channel = StableChannel {
+                                        channel_id: channel.channel_id,
+                                        counterparty: channel.counterparty_node_id,
+                                        is_stable_receiver: false, 
+                                        expected_usd: USD::from_f64(entry.expected_usd),
+                                        expected_btc: Bitcoin::from_btc(entry.native_btc),
+                                        stable_receiver_btc,
+                                        stable_receiver_usd,
+                                        stable_provider_btc,
+                                        stable_provider_usd,
+                                        latest_price: self.base.btc_price,
+                                        risk_level: 0,
+                                        payment_made: false,
+                                        timestamp: 0,
+                                        formatted_datetime: "".to_string(),
+                                        sc_dir: LSP_DATA_DIR.to_string(),
+                                        prices: "".to_string(),
+                                    };
+                                    
+                                    self.stable_channels.push(stable_channel);
+                                    break;
+                                }
+                            }
+                        }
+
+                        println!("Loaded {} stable channels", self.stable_channels.len());
+                        self.base.status_message = format!("Loaded {} stable channels", self.stable_channels.len());
+                    },
+                    Err(e) => {
+                        eprintln!("Error parsing stable channels file: {}", e);
+                        self.base.status_message = format!("Failed to parse stable channels: {}", e);
+                    }
+                }
+            },
+            Err(e) => {
+                eprintln!("Error reading stable channels file: {}", e);
+                self.base.status_message = format!("Failed to read stable channels file: {}", e);
+            }
+        }
     }
 }
 
