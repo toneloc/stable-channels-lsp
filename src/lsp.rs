@@ -18,7 +18,6 @@ use serde::{Serialize, Deserialize};
 use std::fs;
 use std::path::Path;
 
-// Configuration constants
 const LSP_DATA_DIR: &str = "data/lsp";
 const LSP_NODE_ALIAS: &str = "lsp";
 const LSP_PORT: u16 = 9737;
