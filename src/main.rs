@@ -1,42 +1,30 @@
 pub mod price_feeds;
 pub mod types;
 pub mod stable;
-pub mod base;
 
 #[cfg(feature = "user")]
 mod user;
 
-#[cfg(feature = "lsp")]
-mod lsp;
+#[cfg(any(feature = "lsp", feature = "exchange"))]
+mod server;
 
-#[cfg(feature = "exchange")]
-mod exchange;
-
+#[cfg(all(feature = "user", not(any(feature = "lsp", feature = "exchange"))))]
 fn main() {
-    #[cfg(feature = "user")]
-    {
-        println!("Starting in User mode");
-        user::run();
-    }
-    
-    #[cfg(feature = "lsp")]
-    {
-        println!("Starting in LSP mode");
-        lsp::run();
-    }
+    user::run();
+}
 
-    #[cfg(feature = "exchange")]
-    {
-        println!("Starting in Exchange mode");
-        exchange::run();
-    }
-    
-    #[cfg(not(any(feature = "exchange", feature = "user", feature = "lsp")))]
-    {
-        println!("Error: No component selected.");
-        println!("Please build with one of the following features:");
-        println!("  --features exchange");
-        println!("  --features user");
-        println!("  --features lsp");
-    }
+#[cfg(all(not(feature = "user"), any(feature = "lsp", feature = "exchange")))]
+fn main() {
+    let mode = if cfg!(feature = "lsp") {
+        "lsp"
+    } else {
+        "exchange"
+    };
+
+    server::run_with_mode(mode);
+}
+
+#[cfg(not(any(feature = "user", feature = "lsp", feature = "exchange")))]
+fn main() {
+    panic!("Must compile with --features user, lsp, or exchange");
 }

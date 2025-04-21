@@ -1,12 +1,14 @@
 // src/user.rs
 use eframe::{egui, App, Frame};
-use ldk_node::Builder;
+use ldk_node::bitcoin::Network;
+use ldk_node::lightning_invoice::Bolt11Invoice;
+use ldk_node::{Builder, Node};
 use ldk_node::{
     bitcoin::secp256k1::PublicKey,
     lightning::ln::msgs::SocketAddress,
 };
 use ureq::Agent;
-use std::path::PathBuf;
+// use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,64 +16,63 @@ use image::{GrayImage, Luma};
 use qrcode::{QrCode, Color};
 use egui::TextureOptions;
 
-use crate::base::AppState;
 use crate::stable::update_balances;
 use crate::types::*;
+use crate::price_feeds::{get_cached_price, get_latest_price};
+use crate::stable;
 
 const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
-const DEFAULT_LSP_PUBKEY: &str = "036f452075412c2d4c12864200ef8a75341c2b4e7d19a5ed55835fe5a46a10e5ae";
-const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
+const DEFAULT_LSP_PUBKEY: &str = "02d3db21cb7de67f543c6bfa576e5122109325e308013d11cdfda18c6ce4f91a89";
+const DEFAULT_LSP_ADDRESS: &str = "54.210.112.22:9737";
 const EXPECTED_USD: f64 = 8.0;
 const DEFAULT_GATEWAY_PUBKEY: &str = "03809c504e5b078daeaa0052a1b10bd3f48f4d6547fcf7d689965de299b76988f2";
+const DEFAULT_NETWORK: &str = "signet";
+const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 
 #[cfg(feature = "user")]
 pub struct UserApp {
-    base: AppState,
+    pub node: Arc<Node>,
+    pub status_message: String,
+    pub btc_price: f64,
     show_onboarding: bool,
     qr_texture: Option<egui::TextureHandle>,
     waiting_for_payment: bool,
     stable_channel: Arc<Mutex<StableChannel>>,
     background_started: bool,
+
+    // Common UI fields
+    pub invoice_amount: String,
+    pub invoice_result: String,
+    pub invoice_to_pay: String,
+    pub on_chain_address: String,
+    pub on_chain_amount: String,
+    
+    // Balance fields
+    pub lightning_balance_btc: f64,
+    pub onchain_balance_btc: f64,
+    pub lightning_balance_usd: f64,
+    pub onchain_balance_usd: f64,
+    pub total_balance_btc: f64,
+    pub total_balance_usd: f64,
 }
 
 #[cfg(feature = "user")]
 impl UserApp {
-    fn new() -> Self {
+    pub fn new() -> Self {
         println!("Initializing user node...");
 
-        #[cfg(feature = "bundled")]
-        fn get_app_data_dir(component: &str) -> PathBuf {
-            let mut path = dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("./data"))
-                .join("com.stablechannels");
-
-            if !component.is_empty() {
-                path = path.join(component);
-            }
-
-            std::fs::create_dir_all(&path).unwrap_or_else(|e| {
-                eprintln!("Warning: Failed to create data directory: {}", e);
-            });
-
-            path
-        }
-
-        let user_data_dir = get_app_data_dir("user");
-
-        #[cfg(not(feature = "bundled"))]
-        fn get_app_data_dir(component: &str) -> PathBuf {
-            PathBuf::from("./data").join(component)
-        }
-
+        let user_data_dir = USER_DATA_DIR;
         let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY).unwrap();
 
         let mut builder = Builder::new();
-        println!(
-            "Setting LSP with address: {} and pubkey: {}",
-            DEFAULT_LSP_ADDRESS, DEFAULT_LSP_PUBKEY
-        );
+        builder.set_network(Network::Signet);
+        builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
+        builder.set_storage_dir_path(user_data_dir.to_string());
+        builder.set_listening_addresses(vec![format!("127.0.0.1:{}", USER_PORT).parse().unwrap()]).unwrap();
+        builder.set_node_alias(USER_NODE_ALIAS.to_string());
+
         builder.set_liquidity_source_lsps2(
             lsp_pubkey,
             SocketAddress::from_str(DEFAULT_LSP_ADDRESS).unwrap(),
@@ -83,23 +84,14 @@ impl UserApp {
             None,
         );
 
-        let _user_data_dir = get_app_data_dir("user").to_string_lossy().to_string();let user_data_dir = get_app_data_dir("user").to_string_lossy().to_string();
-        
-        let mut base = AppState::new(builder, &user_data_dir, USER_NODE_ALIAS, USER_PORT);
+        let node = Arc::new(builder.build().expect("Failed to build node"));
+        node.start().expect("Failed to start node");
+        println!("User node started: {}", node.node_id());
 
-        if let Ok(pubkey) = PublicKey::from_str(DEFAULT_GATEWAY_PUBKEY) {
-            let socket_addr = SocketAddress::from_str("127.0.0.1:9735").unwrap();
-            let _ = base.node.connect(pubkey, socket_addr, true);
-        }
-
-        if let Ok(pubkey) = PublicKey::from_str(DEFAULT_LSP_ADDRESS) {
-            let socket_addr = SocketAddress::from_str("127.0.0.1:9737").unwrap();
-            let _ = base.node.connect(pubkey, socket_addr, true);
-        }
-
-        if base.btc_price <= 0.0 {
-            if let Ok(price) = crate::price_feeds::get_latest_price(&Agent::new()) {
-                base.btc_price = price;
+        let mut btc_price = crate::price_feeds::get_cached_price();
+        if btc_price <= 0.0 {
+            if let Ok(price) = get_latest_price(&ureq::Agent::new()) {
+                btc_price = price;
             }
         }
 
@@ -108,12 +100,12 @@ impl UserApp {
             counterparty: lsp_pubkey,
             is_stable_receiver: true,
             expected_usd: USD::from_f64(EXPECTED_USD),
-            expected_btc: Bitcoin::from_usd(USD::from_f64(EXPECTED_USD), base.btc_price),
+            expected_btc: Bitcoin::from_usd(USD::from_f64(EXPECTED_USD), btc_price),
             stable_receiver_btc: Bitcoin::default(),
             stable_receiver_usd: USD::default(),
             stable_provider_btc: Bitcoin::default(),
             stable_provider_usd: USD::default(),
-            latest_price: base.btc_price,
+            latest_price: btc_price,
             risk_level: 0,
             payment_made: false,
             timestamp: 0,
@@ -123,59 +115,72 @@ impl UserApp {
         };
         let stable_channel = Arc::new(Mutex::new(sc_init));
 
-        let show_onboarding = base.node.list_channels().is_empty();
+        let show_onboarding = node.list_channels().is_empty();
 
         let app = Self {
-            base,
+            node: Arc::clone(&node),
+            status_message: String::new(),
+            invoice_result: String::new(),
             show_onboarding,
             qr_texture: None,
             waiting_for_payment: false,
-            stable_channel,
+            stable_channel: Arc::clone(&stable_channel),
             background_started: false,
+            btc_price,
+            invoice_amount: "0".to_string(),        
+            invoice_to_pay: String::new(),
+            on_chain_address: String::new(),
+            on_chain_amount: "0".to_string(),  
+            lightning_balance_btc: 0.0,
+            onchain_balance_btc: 0.0,
+            lightning_balance_usd: 0.0,
+            onchain_balance_usd: 0.0,
+            total_balance_btc: 0.0,
+            total_balance_usd: 0.0,
         };
 
         {
-            let current_price = app.base.btc_price;
             let mut sc = app.stable_channel.lock().unwrap();
-            crate::stable::check_stability(&app.base.node, &mut sc, current_price);
-            update_balances(&app.base.node, &mut sc);
+            stable::check_stability(&app.node, &mut sc, btc_price);
+            update_balances(&app.node, &mut sc);
         }
 
-        let node_arc = Arc::clone(&app.base.node);
+        let node_arc = Arc::clone(&app.node);
         let sc_arc = Arc::clone(&app.stable_channel);
 
         std::thread::spawn(move || {
-            use std::{thread::sleep, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
-        
+            use std::{thread::sleep, time::{Duration, SystemTime, UNIX_EPOCH}};
+
             fn current_unix_time() -> i64 {
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs().try_into().unwrap()
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    .try_into()
+                    .unwrap_or(0)
             }
-        
-            let mut last = Instant::now();
-        
+
             loop {
-                sleep(Duration::from_secs(1));
-        
-                if last.elapsed() >= Duration::from_secs(30)
-                    && !node_arc.list_channels().is_empty()
-                {
-                    let price = crate::price_feeds::get_cached_price();
-                    if price > 0.0 {
-                        let mut sc = sc_arc.lock().unwrap();
-                        crate::stable::check_stability(&*node_arc, &mut sc, price);
+                let price = match get_latest_price(&ureq::Agent::new()) {
+                    Ok(p) if p > 0.0 => p,
+                    _ => crate::price_feeds::get_cached_price()
+                };
+
+                if price > 0.0 && !node_arc.list_channels().is_empty() {
+                    if let Ok(mut sc) = sc_arc.lock() {
+                        stable::check_stability(&*node_arc, &mut sc, price);
                         update_balances(&*node_arc, &mut sc);
+
                         sc.latest_price = price;
                         sc.timestamp = current_unix_time();
                     }
-        
-                    last = Instant::now();
                 }
+                sleep(Duration::from_secs(30));
             }
         });
 
         app
     }
-
     // fn get_app_data_dir(component: &str) -> PathBuf {
     //     let mut path = dirs::data_local_dir()
     //         .unwrap_or_else(|| PathBuf::from("./data"))
@@ -192,37 +197,40 @@ impl UserApp {
         
     //     path
     // }
-    
+  
     fn start_background_if_needed(&mut self) {
         if self.background_started {
             return;
         }
-        let node_arc = Arc::clone(&self.base.node);
+
+        let node_arc = Arc::clone(&self.node);
         let sc_arc = Arc::clone(&self.stable_channel);
 
-        // This runs in background every 30 seconds
         std::thread::spawn(move || {
-            use std::{thread::sleep, time::{Duration, Instant}};
-            let mut last = Instant::now();
             loop {
-                sleep(Duration::from_secs(1));
-                if last.elapsed() >= Duration::from_secs(30)
-                    && !node_arc.list_channels().is_empty()
-                {
-                    let price = crate::price_feeds::get_cached_price();
-                    if price > 0.0 {
-                        let mut sc = sc_arc.lock().unwrap();
+                // Always try to get the latest price first
+                let price = match crate::price_feeds::get_latest_price(&ureq::Agent::new()) {
+                    Ok(p) if p > 0.0 => p,
+                    _ => crate::price_feeds::get_cached_price()
+                };
+
+                // Only proceed if we have a valid price and active channels
+                if price > 0.0 && !node_arc.list_channels().is_empty() {
+                    if let Ok(mut sc) = sc_arc.lock() {
                         crate::stable::check_stability(&*node_arc, &mut sc, price);
-                        update_balances(&*node_arc, &mut sc);
+                        crate::stable::update_balances(&*node_arc, &mut sc);
                     }
-                    last = Instant::now();
                 }
+
+                // Sleep between checks, but be ready to interrupt if needed
+                std::thread::sleep(Duration::from_secs(30));
             }
         });
+
         self.background_started = true;
     }
 
-    fn get_jit_invoice(&mut self, ctx: &egui::Context) {
+        fn get_jit_invoice(&mut self, ctx: &egui::Context) {
         let latest_price = {
             let sc = self.stable_channel.lock().unwrap();
             sc.latest_price
@@ -233,7 +241,7 @@ impl UserApp {
             )
             .unwrap(),
         );
-        let result = self.base.node.bolt11_payment().receive_via_jit_channel(
+        let result = self.node.bolt11_payment().receive_via_jit_channel(
             USD::to_msats(USD::from_f64(EXPECTED_USD), latest_price),
             &description,
             3600,
@@ -241,8 +249,8 @@ impl UserApp {
         );
         match result {
             Ok(invoice) => {
-                self.base.invoice_result = invoice.to_string();
-                let code = QrCode::new(&self.base.invoice_result).unwrap();
+                self.invoice_result = invoice.to_string();
+                let code = QrCode::new(&self.invoice_result).unwrap();
                 let bits = code.to_colors();
                 let width = code.width();
                 let scale = 4;
@@ -278,64 +286,146 @@ impl UserApp {
                     TextureOptions::LINEAR,
                 );
                 self.qr_texture = Some(tex);
-                self.base.status_message =
+                self.status_message =
                     "Invoice generated. Pay it to create a JIT channel.".to_string();
                 self.waiting_for_payment = true;
             }
             Err(e) => {
-                self.base.invoice_result = format!("Error: {e:?}");
-                self.base.status_message = format!("Failed to generate invoice: {}", e);
+                self.invoice_result = format!("Error: {e:?}");
+                self.status_message = format!("Failed to generate invoice: {}", e);
             }
         }
     }
 
-    fn get_lsps1_channel(&mut self) {
-        let lsp_balance_sat = 10_000;
-        let client_balance_sat = 10_000;
-        let lsps1 = self.base.node.lsps1_liquidity();
-        match lsps1.request_channel(lsp_balance_sat, client_balance_sat, 2016, false) {
-            Ok(status) => {
-                self.base.status_message =
-                    format!("LSPS1 channel order initiated! Status: {status:?}");
+    pub fn generate_invoice(&mut self) -> bool {
+        if let Ok(amount) = self.invoice_amount.parse::<u64>() {
+            let msats = amount * 1000;
+            match self.node.bolt11_payment().receive(
+                msats,
+                &ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+                    ldk_node::lightning_invoice::Description::new("Invoice".to_string()).unwrap()
+                ),
+                3600,
+            ) {
+                Ok(invoice) => {
+                    self.invoice_result = invoice.to_string();
+                    self.status_message = "Invoice generated".to_string();
+                    true
+                },
+                Err(e) => {
+                    self.status_message = format!("Error: {}", e);
+                    false
+                }
             }
+        } else {
+            self.status_message = "Invalid amount".to_string();
+            false
+        }
+    }
+
+    pub fn pay_invoice(&mut self) -> bool {
+        match Bolt11Invoice::from_str(&self.invoice_to_pay) {
+            Ok(invoice) => {
+                match self.node.bolt11_payment().send(&invoice, None) {
+                    Ok(payment_id) => {
+                        self.status_message = format!("Payment sent, ID: {}", payment_id);
+                        self.invoice_to_pay.clear();
+                        self.update_balances();
+                        true
+                    },
+                    Err(e) => {
+                        self.status_message = format!("Payment error: {}", e);
+                        false
+                    }
+                }
+            },
             Err(e) => {
-                self.base.status_message = format!("LSPS1 channel request failed: {e:?}");
+                self.status_message = format!("Invalid invoice: {}", e);
+                false
             }
         }
     }
+
+    pub fn update_balances(&mut self) {
+        let current_price = get_cached_price();
+        if current_price > 0.0 {
+            self.btc_price = current_price;
+        }
+        
+        let balances = self.node.list_balances();
+        
+        self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
+        self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
+        
+        // Calculate USD values
+        self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
+        self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
+        
+        self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
+        self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+    }
+    
+    pub fn get_address(&mut self) -> bool {
+        match self.node.onchain_payment().new_address() {
+            Ok(address) => {
+                self.on_chain_address = address.to_string();
+                self.status_message = "Address generated".to_string();
+                true
+            },
+            Err(e) => {
+                self.status_message = format!("Error: {}", e);
+                false
+            }
+        }
+    }
+
+    // fn get_lsps1_channel(&mut self) {
+    //     let lsp_balance_sat = 10_000;
+    //     let client_balance_sat = 10_000;
+    //     let lsps1 = self.node.lsps1_liquidity();
+    //     match lsps1.request_channel(lsp_balance_sat, client_balance_sat, 2016, false) {
+    //         Ok(status) => {
+    //             self.status_message =
+    //                 format!("LSPS1 channel order initiated! Status: {status:?}");
+    //         }
+    //         Err(e) => {
+    //             self.status_message = format!("LSPS1 channel request failed: {e:?}");
+    //         }
+    //     }
+    // }
 
     fn process_events(&mut self) {
-        while let Some(event) = self.base.node.next_event() {
+        while let Some(event) = self.node.next_event() {
             match event {
                 ldk_node::Event::ChannelReady { channel_id, .. } => {
-                    self.base.status_message =
+                    self.status_message =
                         format!("Channel {channel_id} is now ready");
                     self.show_onboarding = false;
                     self.waiting_for_payment = false;
                 }
                 ldk_node::Event::PaymentReceived { amount_msat, .. } => {
-                    self.base.status_message = format!("Received payment of {} msats", amount_msat);
+                    self.status_message = format!("Received payment of {} msats", amount_msat);
                     let mut sc = self.stable_channel.lock().unwrap();
-                    update_balances(&self.base.node, &mut sc);
+                    update_balances(&self.node, &mut sc);
                     self.show_onboarding = false;
                     self.waiting_for_payment = false;
                 }
-                ldk_node::Event::PaymentSuccessful { payment_id, payment_hash, payment_preimage, fee_paid_msat } => {
-                    self.base.status_message = format!("Sent payment {}", payment_hash);
+                ldk_node::Event::PaymentSuccessful { payment_id: _, payment_hash, payment_preimage: _, fee_paid_msat: _ } => {
+                    self.status_message = format!("Sent payment {}", payment_hash);
                     let mut sc = self.stable_channel.lock().unwrap();
-                    update_balances(&self.base.node, &mut sc);
+                    update_balances(&self.node, &mut sc);
                 }
                 ldk_node::Event::ChannelClosed { channel_id, .. } => {
-                    self.base.status_message =
+                    self.status_message =
                         format!("Channel {channel_id} has been closed");
-                    if self.base.node.list_channels().is_empty() {
+                    if self.node.list_channels().is_empty() {
                         self.show_onboarding = true;
                         self.waiting_for_payment = false;
                     }
                 }
                 _ => {}
             }
-            self.base.node.event_handled();
+            let _ = self.node.event_handled();
         }
     }
 
@@ -359,7 +449,7 @@ impl UserApp {
                 }
                 ui.add_space(8.0);
                 ui.add(
-                    egui::TextEdit::multiline(&mut self.base.invoice_result)
+                    egui::TextEdit::multiline(&mut self.invoice_result)
                         .frame(true)
                         .desired_width(400.0)
                         .desired_rows(3)
@@ -379,7 +469,7 @@ impl UserApp {
                     )
                     .clicked()
                 {
-                    ui.output_mut(|o| o.copied_text = self.base.invoice_result.clone());
+                    ui.output_mut(|o| o.copied_text = self.invoice_result.clone());
                 }
                 ui.add_space(5.0);
                 if ui
@@ -451,18 +541,18 @@ impl UserApp {
                 .fill(subtle_orange)
                 .rounding(8.0);
                 if ui.add(btn).clicked() {
-                    self.base.status_message =
+                    self.status_message =
                         "Getting JIT channel invoice...".to_string();
                     self.get_jit_invoice(ctx);
                 }
-                if !self.base.status_message.is_empty() {
+                if !self.status_message.is_empty() {
                     ui.add_space(20.0);
-                    ui.label(self.base.status_message.clone());
+                    ui.label(self.status_message.clone());
                 }
                 ui.add_space(20.0);
                 ui.horizontal(|ui| {
                     ui.label("Node ID: ");
-                    let node_id = self.base.node.node_id().to_string();
+                    let node_id = self.node.node_id().to_string();
                     let node_id_short = format!(
                         "{}...{}",
                         &node_id[0..10],
@@ -514,10 +604,12 @@ impl UserApp {
                         ui.heading("Bitcoin Price");
                         ui.label(format!("${:.2}", sc.latest_price));
                         ui.add_space(20.0);
+
                         let last_updated = match SystemTime::now().duration_since(UNIX_EPOCH + std::time::Duration::from_secs(sc.timestamp as u64)) {
                             Ok(duration) => duration.as_secs(),
                             Err(_) => 0,
-                        };                        ui.add_space(5.0);
+                        };                        
+                        ui.add_space(5.0);
                         ui.label(
                             egui::RichText::new(format!(
                                 "Last updated: {}s ago",
@@ -531,7 +623,7 @@ impl UserApp {
                     ui.group(|ui| {
                         ui.heading("Lightning Channels");
                         ui.add_space(5.0);
-                        let channels = self.base.node.list_channels();
+                        let channels = self.node.list_channels();
                         if channels.is_empty() {
                             ui.label("No channels found.");
                         } else {
@@ -544,40 +636,40 @@ impl UserApp {
                         }
                     });
                     ui.add_space(20.0);
-                    if !self.base.status_message.is_empty() {
-                        ui.label(self.base.status_message.clone());
+                    if !self.status_message.is_empty() {
+                        ui.label(self.status_message.clone());
                         ui.add_space(10.0);
                     }
                     ui.group(|ui| {
                         ui.label("Generate Invoice");
                         ui.horizontal(|ui| {
                             ui.label("Amount (sats):");
-                            ui.text_edit_singleline(&mut self.base.invoice_amount);
+                            ui.text_edit_singleline(&mut self.invoice_amount);
                             if ui.button("Get Invoice").clicked() {
-                                self.base.generate_invoice();
+                                self.generate_invoice();
                             }
                         });
-                        if !self.base.invoice_result.is_empty() {
-                            ui.text_edit_multiline(&mut self.base.invoice_result);
+                        if !self.invoice_result.is_empty() {
+                            ui.text_edit_multiline(&mut self.invoice_result);
                             if ui.button("Copy").clicked() {
                                 ui.output_mut(|o| {
-                                    o.copied_text = self.base.invoice_result.clone()
+                                    o.copied_text = self.invoice_result.clone()
                                 });
                             }
                         }
                     });
                     ui.group(|ui| {
                         ui.label("Pay Invoice");
-                        ui.text_edit_multiline(&mut self.base.invoice_to_pay);
+                        ui.text_edit_multiline(&mut self.invoice_to_pay);
                         if ui.button("Pay Invoice").clicked() {
-                            self.base.pay_invoice();
+                            self.pay_invoice();
                         }
                     });
                     if ui.button("Create New Channel").clicked() {
                         self.show_onboarding = true;
                     }
                     if ui.button("Get On-chain Address").clicked() {
-                        self.base.get_address();
+                        self.get_address();
                     }
                 });
             });
